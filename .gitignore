@@ -1,0 +1,55 @@
+# Environment files — never commit secrets
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+.vite/
+.cache/
+
+# TypeScript
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+
+# Vercel
+.vercel/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+backend/__pycache__/
+backend/app/__pycache__/
+backend/app/models/__pycache__/
+backend/app/routes/__pycache__/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Database
+*.sqlite3
+*.db
+
+# IDE / OS
+.vscode/settings.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temp / scratch files
+ci_content.txt
+ci_temp.json

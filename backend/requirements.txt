@@ -1,0 +1,10 @@
+# Python dependencies for the Aegis Flask backend
+# Install with:  pip install -r requirements.txt
+
+Flask==3.0.3                 # The web framework
+Flask-SQLAlchemy==3.1.1      # ORM — maps Python classes to database tables
+Flask-Cors==4.0.1            # Allows the React frontend to call this backend
+Flask-JWT-Extended==4.6.0    # JWT auth tokens (login/register)
+psycopg2-binary==2.9.9       # PostgreSQL driver
+python-dotenv==1.0.1         # Reads .env files
+gunicorn==22.0.0             # Production WSGI server (used by Render)
