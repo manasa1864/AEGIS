@@ -5,6 +5,8 @@
 //   WARNING  — fix is suspicious; logged to the stream but still applied
 //   SAFE     — fix passes all checks
 
+import { yamlParseError } from './yamlCheck';
+
 export interface FixValidationResult {
   path: string;
   safe: boolean;
@@ -27,7 +29,8 @@ const DANGEROUS_PATTERNS: Array<[RegExp, string]> = [
 
 // File extensions that are valid targets for CI/CD fixes.
 const KNOWN_SAFE_EXTENSIONS = new Set([
-  '.yml', '.yaml', '.json', '.toml', '.ts', '.js', '.mjs', '.cjs',
+  '.yml', '.yaml', '.json', '.toml', '.ts', '.js', '.mjs', '.cjs', '.tsx', '.jsx', '.mts', '.cts',
+  '.vue', '.svelte', '.java', '.kt', '.cs', '.php', '.txt', '.cfg', '.ini', '.md',
   '.py', '.rb', '.go', '.rs', '.sh', '.bash', '.zsh', '.env.example',
   '.nvmrc', '.node-version', '.gitignore', '.dockerignore',
   '.eslintrc', '.eslintrc.json', '.prettierrc', '.prettierrc.json',
@@ -54,6 +57,11 @@ export function validateFix(
   // 0. Missing or non-string path — AI sometimes omits this field
   if (!fix.path || typeof fix.path !== 'string') {
     return { path: String(fix.path ?? ''), safe: false, blocked: ['missing or non-string path'], warnings: [] };
+  }
+  // AI occasionally returns content as an object/array — every check below
+  // (and the commit itself) assumes a string, so reject before they throw.
+  if (typeof fix.content !== 'string') {
+    return { path: fix.path, safe: false, blocked: [`non-string content for "${fix.path}"`], warnings: [] };
   }
 
   // 1. Path traversal
@@ -93,6 +101,23 @@ export function validateFix(
     if (tabLines > 0) {
       blocked.push(`YAML must use spaces not tabs in "${fix.path}" (${tabLines} tab-indented lines)`);
     }
+  }
+
+  // 6a. YAML must still parse — block fixes that break a file that parsed before
+  // (a new file must parse too). If the original was already broken, only warn.
+  if (fix.path.endsWith('.yml') || fix.path.endsWith('.yaml')) {
+    const after = yamlParseError(fix.path, fix.content);
+    if (after) {
+      const before = originalContent === undefined ? null : yamlParseError(fix.path, originalContent);
+      if (originalContent === undefined || before === null) blocked.push(`fix produces invalid YAML in "${fix.path}": ${after}`);
+      else warnings.push(`"${fix.path}" was invalid YAML before the fix and still is: ${after}`);
+    }
+  }
+
+  // 6b. Sanitizer placeholder — AI prompts see "[FILTERED]" in place of
+  // injection-like text; a fix that echoes it back would corrupt the file.
+  if (fix.content.includes('[FILTERED]') && !(originalContent ?? '').includes('[FILTERED]')) {
+    blocked.push(`"${fix.path}" contains the prompt-sanitizer placeholder [FILTERED] — AI echoed redacted text`);
   }
 
   // ── WARNING checks ─────────────────────────────────────────────────────────

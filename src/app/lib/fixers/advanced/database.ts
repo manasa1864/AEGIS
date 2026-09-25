@@ -14,30 +14,32 @@ export function fixWaitForDatabase(logs: string, files: Array<{ path: string; co
   const dbType  = isMongo ? 'MongoDB' : isMySQL ? 'MySQL' : 'PostgreSQL';
 
   // Build a type-specific readiness check command
-  let readinessCmd: string;
+  let probe: string;
   if (isMongo) {
-    readinessCmd = `mongosh --eval "db.adminCommand({ping:1})" --quiet 2>/dev/null && echo "${dbType} ready" && break`;
+    probe = `mongosh --eval "db.adminCommand({ping:1})" --quiet >/dev/null 2>&1`;
   } else if (isMySQL) {
-    readinessCmd = `mysqladmin ping -h 127.0.0.1 -P ${dbPort} --silent && echo "${dbType} ready" && break`;
+    probe = `mysqladmin ping -h 127.0.0.1 -P ${dbPort} --silent`;
   } else {
-    readinessCmd = `pg_isready -h localhost -p ${dbPort} && echo "${dbType} ready" && break`;
+    probe = `pg_isready -h localhost -p ${dbPort}`;
   }
 
+  const stepName = `Wait for ${dbType} to be ready`;
   const waitStep = [
-    `      - name: Wait for ${dbType} to be ready`,
+    `      - name: ${stepName}`,
     '        run: |',
     `          echo "Polling ${dbType} on port ${dbPort} (30 × 3s = 90s max)..."`,
     '          for i in $(seq 1 30); do',
-    `            ${readinessCmd} || (echo "Attempt $i/30: not ready — waiting 3s..." && sleep 3)`,
+    `            if ${probe}; then echo "${dbType} ready"; exit 0; fi`,
+    '            echo "Attempt $i/30: not ready — waiting 3s..."; sleep 3',
     '          done',
-    `          ${readinessCmd} || (echo "ERROR: ${dbType} did not become ready in 90s" && exit 1)`,
+    `          echo "ERROR: ${dbType} did not become ready in 90s"; exit 1`,
   ].join('\n');
 
   const fixes: RuleFix[] = [];
   for (const f of files) {
     if (!isGitHubWorkflow(f.path) && !isGitLabCI(f.path)) continue;
     if (!f.content.includes('services:') && !f.content.includes('postgres') && !f.content.includes('mysql') && !f.content.includes('mongo')) continue;
-    if (f.content.includes('wait-for')) continue;
+    if (f.content.includes('wait-for') || f.content.includes(stepName)) continue; // idempotent — the orchestrator may call this twice
     // Do NOT skip files that already have pg_isready — they might have the WRONG host.
     // Fall through to fixPostgresServiceConfig below which corrects the host.
 
@@ -56,7 +58,7 @@ export function fixWaitForDatabase(logs: string, files: Array<{ path: string; co
       const glWait = [
         `  before_script:`,
         `    - echo "Waiting for ${dbType}..."`,
-        `    - for i in $(seq 1 30); do ${readinessCmd} || sleep 3; done`,
+        `    - for i in $(seq 1 30); do ${probe} && break || sleep 3; done`,
       ].join('\n');
       const fixed = f.content.replace(
         /^((?:integration|test|migrate)[\w-]*:)$/im,

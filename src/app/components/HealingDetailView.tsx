@@ -2,12 +2,15 @@ import { motion } from 'motion/react';
 import { Play, Square, Shield, Zap } from 'lucide-react';
 import { SystemGraph } from './SystemGraph';
 import { CIHealthPanel } from './CIHealthPanel';
+import { HealingProgressPanel } from './HealingProgressPanel';
 import { SystemStatus, Project } from '../types';
+import type { HealingRun } from '../lib/healingRun';
 
 interface HealingDetailViewProps {
   project: Project;
   systemStatus: SystemStatus;
   activeNode: string | undefined;
+  run: HealingRun;
   effectivePat: string;
   safeMode: boolean;
   onToggleSafeMode: () => void;
@@ -16,8 +19,11 @@ interface HealingDetailViewProps {
 }
 
 export function HealingDetailView({
-  project, systemStatus, activeNode, effectivePat, safeMode, onToggleSafeMode, onBack, onHeal,
+  project, systemStatus, activeNode, run, effectivePat, safeMode, onToggleSafeMode, onBack, onHeal,
 }: HealingDetailViewProps) {
+  const hasRun = !!run.startedAt;
+  // Re-scan CI whenever the heal reaches a milestone that changes CI state.
+  const ciRefreshKey = `${run.prUrl ?? ''}|${run.verify ?? ''}|${run.outcome?.kind ?? ''}`;
   const isConnected = !!(project.owner && project.repoName);
   const isLive = isConnected && !!effectivePat;
   const missingPat = isConnected && !effectivePat;
@@ -59,15 +65,17 @@ export function HealingDetailView({
             {safeMode ? 'SAFE_MODE' : 'AUTO_APPLY'}
           </motion.button>
         </div>
-        <div className="font-mono text-[9px] text-[#9A8678]/40 tracking-wider">{systemStatus.toUpperCase()}</div>
+        <div className="font-mono text-[9px] tracking-wider" style={{ color: systemStatus === 'healing' ? '#D4A574' : systemStatus === 'healthy' ? '#6A9A7A' : systemStatus === 'stopped' ? '#A06A6A' : '#9A8678' }}>
+          {run.outcome ? run.outcome.kind.toUpperCase() : systemStatus.toUpperCase()}
+        </div>
       </div>
 
       {/* Main area split: system graph on top, CI health panel below */}
       <div className="flex-1 flex flex-col overflow-hidden min-h-0">
 
         {/* System graph + heal button */}
-        <div className="relative p-6 overflow-hidden" style={{ flex: showCI ? '1 1 0' : '1 1 auto' }}>
-          <SystemGraph status={systemStatus} activeNode={activeNode} />
+        <div className="relative p-6 overflow-hidden" style={hasRun ? { flex: '0 0 46%', minHeight: 300 } : { flex: showCI ? '1 1 0' : '1 1 auto' }}>
+          <SystemGraph status={systemStatus} activeNode={activeNode} run={run} />
 
           {/* Warning shown when repo is real but PAT is missing */}
           {missingPat && (
@@ -113,10 +121,17 @@ export function HealingDetailView({
           </div>
         </div>
 
+        {/* Live healing progress — phases, diagnosis, per-file diffs, PR + CI verdict */}
+        {hasRun && (
+          <div className="border-t border-[#CAAA98]/10 flex-1 min-h-0">
+            <HealingProgressPanel run={run} />
+          </div>
+        )}
+
         {/* CI health panel — GitHub only, visible when live */}
         {showCI && (
-          <div className="border-t border-[#CAAA98]/10 flex-shrink-0" style={{ height: '240px' }}>
-            <CIHealthPanel project={project} pat={effectivePat} />
+          <div className="border-t border-[#CAAA98]/10 flex-shrink-0" style={{ height: hasRun ? '170px' : '240px' }}>
+            <CIHealthPanel project={project} pat={effectivePat} refreshKey={ciRefreshKey} live={systemStatus === 'healing'} />
           </div>
         )}
       </div>

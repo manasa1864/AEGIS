@@ -1,0 +1,42 @@
+# Aegis fix catalog #037 — Null dereference at the crashing stack frame
+#
+# Tier:       2 · Source code
+# Category:   null_reference (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | TypeError: Cannot read properties of undefined (reading 'email')
+#   |     at formatUser (/home/runner/work/app/app/src/users.js:3:22)
+#   |     at Array.map (<anonymous>)
+#   |     at listUsers (/home/runner/work/app/app/src/users.js:7:16)
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added --unhandled-rejections=throw — TypeError silently passed CI
+#   MODIFY src/users.js
+#     - Guarded .email with optional chaining at src/users.js:3 — the stack trace shows the object was null/undefined there
+#     - the access now yields undefined instead of throwing. Review whether a default value is more appropriate
+#
+# Apply:      git apply 02-code/037-code-null-deref.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,6 +14,7 @@
+ env:
+   CI: 'true'
+   NODE_ENV: test
++  NODE_OPTIONS: --unhandled-rejections=throw
+ jobs:
+   build:
+     runs-on: ubuntu-latest
+diff --git a/src/users.js b/src/users.js
+--- a/src/users.js
++++ b/src/users.js
+@@ -1,6 +1,6 @@
+ export function formatUser(user) {
+   const name = user.name ?? 'anonymous';
+-  return `${name} <${user.profile.email}>`;
++  return `${name} <${user.profile?.email}>`;
+ }
+ 
+ export function listUsers(users) {

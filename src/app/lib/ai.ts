@@ -1,23 +1,25 @@
+import { extractJson } from './jsonExtract';
+import { GEMINI_EMBEDDING_MODEL, GROQ_MODEL, geminiGenerateUrl, geminiText } from './models';
+
 /**
  * AI utilities — call priority:
  *   1. Gemini API (Google AI — free tier via API key from aistudio.google.com)
  *   2. Groq (fast open-source LLM, fallback)
  *
- * Embeddings: Gemini text-embedding-004
+ * Embeddings: Gemini embedding model (see models.ts)
  */
 
 export async function callAI(geminiKey: string, groqKey: string, prompt: string): Promise<string> {
   // 1. Gemini (Google AI)
   if (geminiKey) {
     try {
-      const res = await fetch('/api/gemini/v1beta/models/gemini-2.0-flash:generateContent', {
+      const res = await fetch(geminiGenerateUrl(), {
         method: 'POST',
         headers: { 'x-goog-api-key': geminiKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
       });
       if (res.ok) {
-        const d = await res.json();
-        const text = d.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+        const text = geminiText(await res.json());
         if (text) return text;
       }
     } catch { /* fall through */ }
@@ -30,7 +32,7 @@ export async function callAI(geminiKey: string, groqKey: string, prompt: string)
         method: 'POST',
         headers: { Authorization: `Bearer ${groqKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
+          model: GROQ_MODEL,
           messages: [{ role: 'user', content: prompt }],
           temperature: 0.3,
         }),
@@ -49,7 +51,7 @@ export async function callAI(geminiKey: string, groqKey: string, prompt: string)
 export async function getEmbedding(geminiKey: string, text: string): Promise<number[]> {
   if (!geminiKey) return [];
   try {
-    const res = await fetch('/api/gemini/v1beta/models/text-embedding-004:embedContent', {
+    const res = await fetch(`/api/gemini/v1beta/models/${GEMINI_EMBEDDING_MODEL}:embedContent`, {
       method: 'POST',
       headers: { 'x-goog-api-key': geminiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: { parts: [{ text }] } }),
@@ -63,11 +65,5 @@ export async function getEmbedding(geminiKey: string, text: string): Promise<num
 }
 
 export function parseJSON<T>(text: string): T | null {
-  try {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return null;
-    return JSON.parse(match[0]) as T;
-  } catch {
-    return null;
-  }
+  return extractJson<T>(text);
 }

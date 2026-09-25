@@ -3,7 +3,7 @@
 // GitLab stage declarations, flaky test retry, security scan non-blocking,
 // concurrency groups, missing reports directory, fail-fast, job outputs.
 
-import { RuleFix, isGitHubWorkflow, isGitLabCI, patchGitHubJobBlocks } from '../helpers';
+import { RuleFix, isGitHubWorkflow, isGitLabCI, patchGitHubJobBlocks, patchGitLabJobBlocks, declareJobOutputs } from '../helpers';
 
 /** Add needs: [build] to test/deploy/publish jobs that are missing a dependency. */
 export function fixMissingJobNeeds(files: Array<{ path: string; content: string }>): RuleFix[] {
@@ -177,8 +177,9 @@ export function fixCircularDependency(logs: string, files: Array<{ path: string;
     for (const line of lines) {
       const jobMatch = line.match(/^  ([\w-]+):\s*$/);
       if (jobMatch) { currentJob = jobMatch[1]; jobNeeds.set(currentJob, []); }
-      const needsMatch = line.match(/^\s+needs:\s*\[([^\]]+)\]/);
-      if (needsMatch && currentJob) jobNeeds.set(currentJob, needsMatch[1].split(',').map(s => s.trim()));
+      // needs: [a, b]  or  needs: a
+      const needsMatch = line.match(/^\s+needs:\s*(?:\[([^\]]+)\]|([\w-]+)\s*$)/);
+      if (needsMatch && currentJob) jobNeeds.set(currentJob, (needsMatch[1] ?? needsMatch[2]).split(',').map(s => s.trim()));
     }
     const hasCycle = (job: string, visited: Set<string>, stack: Set<string>): boolean => {
       visited.add(job); stack.add(job);
@@ -237,10 +238,12 @@ export function fixFailedPipelineStageRetry(logs: string, files: Array<{ path: s
   for (const f of files) {
     if (isGitLabCI(f.path)) {
       if (f.content.includes('retry:')) continue;
-      const fixed = f.content.replace(
-        /^(\w[\w-]+:\s*\n)((?:\s+[^\n]+\n)*\s+script:)/gm,
-        (_, header, rest) => `${header}  retry:\n    max: 2\n    when:\n      - runner_system_failure\n      - stuck_or_timeout_failure\n${rest}`,
-      );
+      // Only real jobs (not global keys like stages:/variables:) that run a script
+      const fixed = patchGitLabJobBlocks(
+        f.content,
+        block => /^\s+script:/m.test(block),
+        '  retry:\n    max: 2\n    when:\n      - runner_system_failure\n      - stuck_or_timeout_failure',
+      ) ?? f.content;
       if (fixed !== f.content)
         fixes.push({ path: f.path, content: fixed, explanation: 'Added retry: max: 2 with when: conditions to GitLab CI jobs — transient failures (runner crash, network timeout, stuck jobs) will be retried automatically; when: conditions ensure we only retry infrastructure failures, not code failures', confidence: 100 });
     }
@@ -334,42 +337,9 @@ export function fixMissingJobOutputs(files: Array<{ path: string; content: strin
   for (const f of files) {
     if (!isGitHubWorkflow(f.path)) continue;
     if (!f.content.includes('GITHUB_OUTPUT') || f.content.includes('outputs:')) continue;
-    // Extract output variable names from GITHUB_OUTPUT writes
-    const outputNames = [...f.content.matchAll(/echo\s+"([^=]+)=[^"]*"\s*>>\s*\$GITHUB_OUTPUT/g)].map(m => m[1]);
-    if (outputNames.length === 0) continue;
-    // Find the job that writes these outputs
-    const lines = f.content.split('\n');
-    const out: string[] = [];
-    let modified = false;
-    let inJob = false;
-    for (let i = 0; i < lines.length; i++) {
-      out.push(lines[i]);
-      if (/^  [\w-]+:\s*$/.test(lines[i])) {
-        inJob = true;
-        // Check if this job's block contains GITHUB_OUTPUT writes
-        let end = i + 1;
-        while (end < lines.length && (lines[end].startsWith('    ') || lines[end].trim() === '')) end++;
-        const jobBlock = lines.slice(i + 1, end).join('\n');
-        if (jobBlock.includes('GITHUB_OUTPUT') && !jobBlock.includes('outputs:')) {
-          // Find where to insert outputs block (after runs-on)
-          for (let j = i + 1; j < i + 5 && j < lines.length; j++) {
-            if (/^\s+runs-on:/.test(lines[j])) {
-              out.push(lines[j]);
-              i = j;
-              out.push('    outputs:');
-              for (const name of outputNames) {
-                out.push(`      ${name}: \${{ steps.<step-id>.outputs.${name} }}`);
-              }
-              modified = true;
-              break;
-            }
-          }
-        }
-        inJob = false;
-      }
-    }
-    if (modified)
-      fixes.push({ path: f.path, content: out.join('\n'), explanation: `Added outputs: declaration for [${outputNames.join(', ')}] — jobs must declare outputs: to expose values set via GITHUB_OUTPUT to downstream jobs; without the declaration, other jobs cannot read the values`, confidence: 100 });
+    const declared = declareJobOutputs(f.content);
+    if (declared)
+      fixes.push({ path: f.path, content: declared.content, explanation: `Added outputs: declaration for [${declared.names.join(', ')}] — jobs must declare outputs: to expose values set via GITHUB_OUTPUT to downstream jobs; without the declaration, other jobs cannot read the values`, confidence: 100 });
   }
   return fixes;
 }
@@ -382,13 +352,14 @@ export function fixGitLabMissingCache(files: Array<{ path: string; content: stri
     if (f.content.includes('cache:') || (!f.content.includes('npm') && !f.content.includes('pip') && !f.content.includes('go '))) continue;
     const isNode = /npm|yarn|pnpm/.test(f.content);
     const isPython = /pip|python/.test(f.content);
-    const isGo = /go build|go test/.test(f.content);
     const cacheConfig = isNode
       ? `cache:\n  key:\n    files:\n      - package-lock.json\n      - yarn.lock\n      - pnpm-lock.yaml\n  paths:\n    - node_modules/\n    - .npm/\n  policy: pull-push\n`
       : isPython
         ? `cache:\n  key:\n    files:\n      - requirements.txt\n  paths:\n    - .venv/\n    - ~/.cache/pip/\n  policy: pull-push\n`
         : `cache:\n  key:\n    files:\n      - go.sum\n  paths:\n    - .go/pkg/mod/\n  policy: pull-push\n`;
-    const fixed = f.content.replace(/^(\w[\w-]+:\s*\n)((?:\s+[^\n]+\n)*\s+script:)/gm, (_, header, rest) => `${header}${cacheConfig}${rest}`);
+    // cache: is a pipeline-level (top-level) key — add it once at the top of the
+    // file. Splicing it after a job header broke the job mapping.
+    const fixed = `${cacheConfig}\n${f.content}`;
     if (fixed !== f.content)
       fixes.push({ path: f.path, content: fixed, explanation: `Added GitLab CI cache for ${isNode ? 'node_modules' : isPython ? 'Python venv' : 'Go modules'} — without caching, dependencies are downloaded from scratch on every pipeline run, increasing build time by 2-10 minutes`, confidence: 100 });
   }
@@ -491,7 +462,7 @@ export function fixGitLabIncrementalPipeline(files: Array<{ path: string; conten
     if (f.content.includes('rules:') || f.content.includes('only:')) continue;
     // Detect job type and add appropriate rules
     const fixed = f.content.replace(
-      /^([\w-]+:\s*\n)((?:\s+[^\n]+\n)*\s+script:)/gm,
+      /^([\w-]+:[ \t]*\n)((?:[ \t]+\S[^\n]*\n)*[ \t]+script:)/gm,
       (match, header, rest) => {
         const name = header.trim().replace(':', '').toLowerCase();
         if (/test|spec|jest|mocha|pytest/.test(name))
@@ -881,9 +852,12 @@ export function fixPathFilterTrigger(files: Array<{ path: string; content: strin
     if (!f.content.includes('push:') && !f.content.includes('pull_request:')) continue;
     // Only add path filters for workflows with build/test steps
     if (!f.content.includes('npm') && !f.content.includes('gradle') && !f.content.includes('cargo')) continue;
+    // Indent paths-ignore as a sibling of branches: — a fixed 6-space indent
+    // nested it under `branches: [main]` in the standard layout (invalid YAML).
     const fixed = f.content.replace(
-      /(push:\s*\n)(\s+branches:[^\n]+\n)/,
-      `$1$2      paths-ignore:\n        - '**.md'\n        - 'docs/**'\n        - '.github/CODEOWNERS'\n        - 'LICENSE'\n`,
+      /(push:[ \t]*\n)([ \t]+)(branches:[^\n]+\n)/,
+      (_, push, ind, branches) =>
+        `${push}${ind}${branches}${ind}paths-ignore:\n${ind}  - '**.md'\n${ind}  - 'docs/**'\n${ind}  - '.github/CODEOWNERS'\n${ind}  - 'LICENSE'\n`,
     );
     if (fixed !== f.content)
       fixes.push({ path: f.path, content: fixed, explanation: 'Added paths-ignore to push trigger — CI runs triggered by README edits, doc updates, and license changes waste runner minutes; paths-ignore skips the workflow when all changed files match the ignored patterns', confidence: 82 });
@@ -1017,7 +991,7 @@ export function fixGitLabJobTimeout(logs: string, files: Array<{ path: string; c
     if (f.content.includes('timeout:')) continue;
     // Add timeout to integration/e2e/performance test jobs
     const fixed = f.content.replace(
-      /^((?:integration|e2e|performance|load|stress)[\w-]*:\s*\n)((?:\s+[^\n]+\n)*\s+script:)/gim,
+      /^((?:integration|e2e|performance|load|stress)[\w-]*:[ \t]*\n)((?:[ \t]+\S[^\n]*\n)*[ \t]+script:)/gim,
       (_, header, rest) => `${header}  timeout: 1h 30m\n${rest}`,
     );
     if (fixed !== f.content)
@@ -1293,7 +1267,7 @@ export function fixGitLabCachePolicy(files: Array<{ path: string; content: strin
     if (!isGitLabCI(f.path)) continue;
     if (!f.content.includes('cache:') || f.content.includes('policy:')) continue;
     const fixed = f.content.replace(
-      /^([\w-]+:\s*\n)((?:\s+[^\n]+\n)*\s+cache:\s*\n(?:\s+[^\n]+\n)*\s+script:[^\n]*\n)/gm,
+      /^([\w-]+:[ \t]*\n)((?:[ \t]+\S[^\n]*\n)*[ \t]+cache:[ \t]*\n(?:[ \t]+\S[^\n]*\n)*[ \t]+script:[^\n]*\n)/gm,
       (match, header, rest) => {
         const name = header.trim().replace(':', '').toLowerCase();
         const policy = /install|setup|deps|dependencies/.test(name) ? 'pull-push' : 'pull';
@@ -1404,7 +1378,6 @@ export function fixDownloadAfterUpload(files: Array<{ path: string; content: str
       if (missingUploaders.length === 0) continue;
       const needsMatch = djBlock.match(/needs:\s*\[([^\]]+)\]/);
       if (needsMatch) {
-        const existing = needsMatch[1];
         content = content.replace(
           new RegExp(`(  ${dj}:[\\s\\S]*?)needs:\\s*\\[([^\\]]+)\\]`),
           (_, header, deps) => `${header}needs: [${deps}, ${missingUploaders.join(', ')}]`,

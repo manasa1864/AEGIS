@@ -1,0 +1,28 @@
+# Aegis fix catalog #002 — Duplicate key in a YAML mapping
+#
+# Tier:       1 · Simple
+# Category:   duplicate_config_key (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Invalid workflow file: .github/workflows/ci.yml#L18
+#   | duplicate mapping key "runs-on"
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Removed duplicate YAML keys — GitHub Actions and most YAML parsers reject a mapping that repeats a key
+#     - the first occurrence is kept and the duplicate is commented out
+#
+# Apply:      git apply 01-simple/002-duplicate_config_key.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -17,7 +17,7 @@
+ jobs:
+   build:
+     runs-on: ubuntu-latest
+-    runs-on: ubuntu-22.04
++    # aegis-fix: duplicate key removed: runs-on: ubuntu-22.04
+     timeout-minutes: 15
+     steps:
+       - uses: actions/checkout@v4

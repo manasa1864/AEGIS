@@ -1,0 +1,28 @@
+# Aegis fix catalog #056 — Push from CI rejected as non-fast-forward
+#
+# Tier:       3 · Intermediate
+# Category:   git_push_rejected (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   |  ! [rejected]        main -> main (fetch first)
+#   | error: failed to push some refs to 'https://github.com/acme/app'
+#   | hint: Updates were rejected because the remote contains work that you do not have locally.
+#   | rejected non-fast-forward
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Changed git push to use HEAD ref or --force-with-lease — direct push to protected branch is rejected
+#     - automated branches bypass protection
+#     - --force-with-lease is safer than --force because it aborts if the remote has new commits
+#
+# Apply:      git apply 03-intermediate/056-git_push_rejected.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -25,4 +25,4 @@
+           node-version: 20
+           cache: npm
+       - run: npm ci
+-      - run: npm version patch && git push
++      - run: npm version patch && git push --force-with-lease

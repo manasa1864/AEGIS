@@ -1,0 +1,28 @@
+# Aegis fix catalog #031 — Leftover `debugger` statement
+#
+# Tier:       2 · Source code
+# Category:   lint_failure
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | /home/runner/work/app/app/src/cart.js
+#   |   5:3  error  Unexpected 'debugger' statement  no-debugger
+#   | 
+#   | ✖ 1 problem (1 error, 0 warnings)
+#
+# How it is solved:
+#   MODIFY src/cart.js
+#     - Removed leftover debugger statement — a debugger left in committed code fails the lint gate or blocks CI waiting for interactive input
+#
+# Apply:      git apply 02-code/031-code-debugger-statement.diff
+diff --git a/src/cart.js b/src/cart.js
+--- a/src/cart.js
++++ b/src/cart.js
+@@ -2,7 +2,6 @@
+   let sum = 0;
+   for (const item of items) {
+     sum += item.price * item.qty;
+-    debugger;
+   }
+   return sum;
+ }

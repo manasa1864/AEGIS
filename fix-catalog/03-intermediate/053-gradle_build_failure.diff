@@ -1,0 +1,44 @@
+# Aegis fix catalog #053 — Gradle wrapper not executable / no JDK
+#
+# Tier:       3 · Intermediate
+# Category:   gradle_build_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | ./gradlew: Permission denied
+#   | FAILURE: Build failed with an exception.
+#   | * What went wrong: gradle build failed
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added actions/setup-java@v4 (Temurin 21 LTS) — Maven/Gradle detected but no Java setup step
+#     - Temurin is the recommended free OpenJDK distribution with built-in gradle dependency caching
+#     - Added JVM options — CI runners have limited memory
+#     - MAVEN_OPTS/GRADLE_OPTS set heap size and file encoding
+#     - Gradle daemon disabled to avoid persistent background processes
+#     - Added chmod +x ./gradlew — Gradle wrapper loses execute permission on checkout
+#     - causes "Permission denied: ./gradlew"
+#
+# Apply:      git apply 03-intermediate/053-gradle_build_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,10 +14,17 @@
+ env:
+   CI: 'true'
+   NODE_ENV: test
++  GRADLE_OPTS: '-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2048m'
+ jobs:
+   build:
+     runs-on: ubuntu-latest
+     timeout-minutes: 15
+     steps:
+       - uses: actions/checkout@v4
+-      - run: ./gradlew build
++      - name: Set up JDK 21
++        uses: actions/setup-java@v4
++        with:
++          java-version: '21'
++          distribution: 'temurin'
++          cache: 'gradle'
++      - run: chmod +x ./gradlew && ./gradlew build

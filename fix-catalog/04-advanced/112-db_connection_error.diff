@@ -1,0 +1,56 @@
+# Aegis fix catalog #112 — Tests start before the database service
+#
+# Tier:       4 · Advanced
+# Category:   db_connection_error (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error: connect ECONNREFUSED 127.0.0.1:5432
+#   |     at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1555:16)
+#   | PrismaClientInitializationError: Can't reach database server at `localhost:5432`
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added PostgreSQL readiness poll (30 × 3s) before migration/tests — ECONNREFUSED on port 5432 means service hasn't started
+#     - Added PostgreSQL service container — tests connect to a DB but no service was configured
+#
+# Apply:      git apply 04-advanced/112-db_connection_error.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -17,6 +17,20 @@
+ jobs:
+   build:
+     runs-on: ubuntu-latest
++    services:
++      postgres:
++        image: postgres:16-alpine
++        env:
++          POSTGRES_USER: testuser
++          POSTGRES_PASSWORD: testpass
++          POSTGRES_DB: testdb
++        ports:
++          - '5432:5432'
++        options: >-
++          --health-cmd pg_isready
++          --health-interval 10s
++          --health-timeout 5s
++          --health-retries 5
+     timeout-minutes: 15
+     steps:
+       - uses: actions/checkout@v4
+@@ -25,6 +39,14 @@
+           node-version: 20
+           cache: npm
+       - run: npm ci
++      - name: Wait for PostgreSQL to be ready
++        run: |
++          echo "Polling PostgreSQL on port 5432 (30 × 3s = 90s max)..."
++          for i in $(seq 1 30); do
++            if pg_isready -h localhost -p 5432; then echo "PostgreSQL ready"; exit 0; fi
++            echo "Attempt $i/30: not ready — waiting 3s..."; sleep 3
++          done
++          echo "ERROR: PostgreSQL did not become ready in 90s"; exit 1
+       - run: npx prisma migrate deploy
+       - run: npm test
+         env:

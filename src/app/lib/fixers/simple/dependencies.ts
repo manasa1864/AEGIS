@@ -307,7 +307,7 @@ export function fixGoModDownload(files: Array<{ path: string; content: string }>
     } else {
       const fixed = f.content.includes('before_script:')
         ? f.content.replace(/^(before_script:\s*\n)/m, '$1  - go mod download && go mod verify\n')
-        : f.content.replace(/^(\w[\w-]+:\s*\n)((?:\s+[^\n]+\n)*\s+script:)/gm,
+        : f.content.replace(/^(\w[\w-]+:[ \t]*\n)((?:[ \t]+\S[^\n]*\n)*[ \t]+script:)/gm,
             (_, h, rest) => `${h}  before_script:\n    - go mod download\n    - go mod verify\n${rest}`);
       if (fixed !== f.content)
         fixes.push({ path: f.path, content: fixed, explanation: 'Added go mod download in before_script — fresh GitLab runner has empty module cache; modules must be downloaded before building', confidence: 100 });

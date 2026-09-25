@@ -1,3 +1,5 @@
+import { b64DecodeUtf8, b64EncodeUtf8 } from './base64';
+
 export interface RepoInfo {
   owner: string;
   repo: string;
@@ -13,6 +15,7 @@ export interface RepoInfo {
 
 export interface WorkflowRun {
   id: number;
+  workflow_id?: number;
   name: string;
   status: string;
   conclusion: string;
@@ -37,6 +40,16 @@ export interface FileContent {
 }
 
 const BASE = 'https://api.github.com';
+
+// Branch names and file paths go into URLs — encode them so names containing
+// '#', '?', '&', '%' or spaces don't truncate or corrupt the request.
+const encRef = (ref: string) => encodeURIComponent(ref);
+const encPath = (path: string) => path.split('/').map(encodeURIComponent).join('/');
+
+// Run conclusions that mean "CI is red". startup_failure is what GitHub reports
+// when a workflow file is invalid and no job ever starts.
+const FAILED_CONCLUSIONS = new Set(['failure', 'startup_failure', 'timed_out']);
+export const isFailedConclusion = (c: string | null | undefined) => !!c && FAILED_CONCLUSIONS.has(c);
 
 function h(pat: string): HeadersInit {
   return {
@@ -97,13 +110,16 @@ export async function getAllLatestFailedRuns(pat: string, owner: string, repo: s
   const runs: WorkflowRun[] = d.workflow_runs ?? [];
 
   // For each workflow, keep only the most recent run (runs are newest-first from the API).
-  const latestPerWorkflow = new Map<string, WorkflowRun>();
+  // Keyed by workflow_id (file identity) so two workflows sharing a display name
+  // don't hide each other.
+  const latestPerWorkflow = new Map<number | string, WorkflowRun>();
   for (const r of runs) {
-    if (!latestPerWorkflow.has(r.name)) latestPerWorkflow.set(r.name, r);
+    const key = r.workflow_id ?? r.name;
+    if (!latestPerWorkflow.has(key)) latestPerWorkflow.set(key, r);
   }
 
   // Only return workflows whose most recent run is a failure.
-  return [...latestPerWorkflow.values()].filter(r => r.conclusion === 'failure');
+  return [...latestPerWorkflow.values()].filter(r => FAILED_CONCLUSIONS.has(r.conclusion));
 }
 
 /** Return failed workflow runs on a specific branch (used for deep-diagnosis after FIX_UNVERIFIED). */
@@ -141,7 +157,7 @@ export async function getRunJobs(pat: string, owner: string, repo: string, runId
 }
 
 export async function getWorkflowFiles(pat: string, owner: string, repo: string, branch: string): Promise<FileContent[]> {
-  const res = await fetch(`${BASE}/repos/${owner}/${repo}/contents/.github/workflows?ref=${branch}`, { headers: h(pat) });
+  const res = await fetch(`${BASE}/repos/${owner}/${repo}/contents/.github/workflows?ref=${encRef(branch)}`, { headers: h(pat) });
   if (!res.ok) return [];
   const files = await res.json();
   if (!Array.isArray(files)) return [];
@@ -149,11 +165,11 @@ export async function getWorkflowFiles(pat: string, owner: string, repo: string,
   const yamls = files.filter((f: { name: string }) => f.name.endsWith('.yml') || f.name.endsWith('.yaml'));
   const results = await Promise.all(
     yamls.map(async (f: { path: string }) => {
-      const r = await fetch(`${BASE}/repos/${owner}/${repo}/contents/${f.path}?ref=${branch}`, { headers: h(pat) });
+      const r = await fetch(`${BASE}/repos/${owner}/${repo}/contents/${encPath(f.path)}?ref=${encRef(branch)}`, { headers: h(pat) });
       if (!r.ok) return null;
       const d = await r.json();
       if (!d || d.encoding !== 'base64' || !d.content || !d.path) return null;
-      return { path: d.path, content: atob(d.content.replace(/\n/g, '')), sha: d.sha ?? '' } as FileContent;
+      return { path: d.path, content: b64DecodeUtf8(d.content), sha: d.sha ?? '' } as FileContent;
     })
   );
   return results.filter(Boolean) as FileContent[];
@@ -179,18 +195,18 @@ export async function fetchRepoFile(
   pat: string, owner: string, repo: string, path: string, branch: string,
 ): Promise<FileContent | null> {
   try {
-    const res = await fetch(`${BASE}/repos/${owner}/${repo}/contents/${path}?ref=${branch}`, { headers: h(pat) });
+    const res = await fetch(`${BASE}/repos/${owner}/${repo}/contents/${encPath(path)}?ref=${encRef(branch)}`, { headers: h(pat) });
     if (!res.ok) return null;
     const d = await res.json();
     if (d.encoding !== 'base64' || !d.content) return null;
-    return { path: d.path, content: atob(d.content.replace(/\n/g, '')), sha: d.sha };
+    return { path: d.path, content: b64DecodeUtf8(d.content), sha: d.sha };
   } catch {
     return null;
   }
 }
 
 export async function createBranch(pat: string, owner: string, repo: string, branch: string, from: string): Promise<boolean> {
-  const refRes = await fetch(`${BASE}/repos/${owner}/${repo}/git/ref/heads/${from}`, { headers: h(pat) });
+  const refRes = await fetch(`${BASE}/repos/${owner}/${repo}/git/ref/heads/${encPath(from)}`, { headers: h(pat) });
   if (!refRes.ok) {
     const body = await refRes.json().catch(() => ({}));
     console.error(`[AEGIS] createBranch: get-ref failed HTTP ${refRes.status}`, body);
@@ -216,11 +232,18 @@ export async function commitFile(
   pat: string, owner: string, repo: string,
   path: string, content: string, sha: string, message: string, branch: string
 ): Promise<string | null> {
-  const res = await fetch(`${BASE}/repos/${owner}/${repo}/contents/${path}`, {
+  const put = (fileSha: string) => fetch(`${BASE}/repos/${owner}/${repo}/contents/${encPath(path)}`, {
     method: 'PUT',
     headers: { ...h(pat), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, content: btoa(unescape(encodeURIComponent(content))), ...(sha ? { sha } : {}), branch }),
+    body: JSON.stringify({ message, content: b64EncodeUtf8(content), ...(fileSha ? { sha: fileSha } : {}), branch }),
   });
+  let res = await put(sha);
+  // 409 = stale sha, 422 = file exists but no sha given (AI "created" a file
+  // that was never fetched). Look up the real blob sha on the branch and retry once.
+  if (res.status === 409 || res.status === 422) {
+    const current = await fetchRepoFile(pat, owner, repo, path, branch);
+    if (current?.sha && current.sha !== sha) res = await put(current.sha);
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     console.error(`[AEGIS] commitFile failed HTTP ${res.status} path=${path}`, err);
@@ -286,7 +309,7 @@ export async function getComprehensiveCI(
   const results = await Promise.all(
     [...latestByWorkflow.values()].map(async (run) => {
       let failedJobs: Array<{ name: string; failedSteps: string[] }> = [];
-      if (run.conclusion === 'failure') {
+      if (FAILED_CONCLUSIONS.has(run.conclusion as string)) {
         const jobs = await getRunJobs(pat, owner, repo, run.id as number);
         failedJobs = jobs
           .filter(j => j.conclusion === 'failure')
@@ -309,8 +332,8 @@ export async function getComprehensiveCI(
 
   // Failures first, then alphabetical
   return results.sort((a, b) => {
-    if (a.conclusion === 'failure' && b.conclusion !== 'failure') return -1;
-    if (b.conclusion === 'failure' && a.conclusion !== 'failure') return 1;
+    const aFailed = isFailedConclusion(a.conclusion), bFailed = isFailedConclusion(b.conclusion);
+    if (aFailed !== bFailed) return aFailed ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
 }
@@ -341,12 +364,13 @@ export async function waitForBranchCI(
     if (runs.length === 0) continue;  // CI not triggered yet — keep waiting
 
     const anyInProgress = runs.some(r =>
-      r.status === 'in_progress' || r.status === 'queued' ||
+      r.status === 'in_progress' || r.status === 'queued' || r.status === 'pending' ||
       r.status === 'waiting' || r.status === 'requested',
     );
     if (anyInProgress) continue;  // Still running — keep polling
 
-    return runs.some(r => r.conclusion === 'failure') ? 'failure' : 'success';
+    // A cancelled or timed-out run is not a green build — don't report the fix as verified.
+    return runs.some(r => FAILED_CONCLUSIONS.has(r.conclusion) || r.conclusion === 'cancelled') ? 'failure' : 'success';
   }
 
   return 'timeout';

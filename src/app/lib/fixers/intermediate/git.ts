@@ -503,10 +503,12 @@ export function fixNonFastForwardPush(logs: string, files: Array<{ path: string;
   for (const f of files) {
     if (!isGitHubWorkflow(f.path) && !isGitLabCI(f.path)) continue;
     if (!f.content.includes('git push') || f.content.includes('git pull') || f.content.includes('git fetch')) continue;
+    // ${{ }} is GitHub Actions syntax — in .gitlab-ci.yml it reaches the shell
+    // verbatim and fails with "bad substitution". GitLab exposes the branch as a variable.
+    const branchRef = isGitLabCI(f.path) ? '$CI_COMMIT_REF_NAME' : "${{ github.ref_name || 'main' }}";
     const fixed = f.content.replace(
-      /(\s+)(git push\b(?!\s+--force)([^\n]*))/g,
-      (_, ws, push, args) =>
-        `${ws}git fetch origin\n${ws}git rebase origin/\${{ github.ref_name || 'main' }}\n${ws}${push}`,
+      /(\s+)(git push\b(?!\s+--force)[^\n]*)/g,
+      (_, ws, push) => `${ws}git fetch origin\n${ws}git rebase origin/${branchRef}\n${ws}${push}`,
     );
     if (fixed !== f.content)
       fixes.push({ path: f.path, content: fixed, explanation: 'Added fetch + rebase before push — non-fast-forward push rejection means the remote has commits not present locally; rebasing replays local commits on top, enabling a clean fast-forward push', confidence: 90 });
@@ -1025,11 +1027,10 @@ export function fixGitLFSCheckout(logs: string, files: Array<{ path: string; con
       }
     }
     if (modified) {
-      const withLfsInstall = out.join('\n').replace(
-        /(uses:\s*actions\/checkout)/,
-        '- name: Install Git LFS\n        run: git lfs install\n      - $1',
-      );
-      fixes.push({ path: f.path, content: withLfsInstall, explanation: 'Added lfs: true to checkout + git lfs install step — Git LFS files failed to download; lfs: true downloads actual file content instead of LFS pointers', confidence: 100 });
+      // `lfs: true` makes actions/checkout install LFS and pull objects itself;
+      // the old extra "git lfs install" step was spliced in as a nested list item
+      // (`- - name:`), which produced invalid YAML.
+      fixes.push({ path: f.path, content: out.join('\n'), explanation: 'Added lfs: true to actions/checkout — Git LFS files failed to download; with lfs: true the checkout step fetches the real file content instead of LFS pointer files', confidence: 100 });
     }
   }
   return fixes;

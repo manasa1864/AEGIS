@@ -1,0 +1,28 @@
+# Aegis fix catalog #007 — Dependencies never installed before use
+#
+# Tier:       1 · Simple
+# Category:   missing_dependency (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error: Cannot find module 'express'
+#   | Require stack:
+#   | - /home/runner/work/app/app/server.js
+#   |   code: 'MODULE_NOT_FOUND'
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added npm ci before build/test — no install step found
+#     - npm ci is required to populate node_modules before any npm scripts run
+#
+# Apply:      git apply 01-simple/007-missing_dependency.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -23,4 +23,6 @@
+       - uses: actions/setup-node@v4
+         with:
+           node-version: 20
++      - name: Install dependencies
++        run: npm ci
+       - run: npm test

@@ -11,6 +11,7 @@ The frontend calls POST /api/runs when it detects any pipeline run
 """
 
 from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
 from ..db import db
 from ..models.pipeline_run import PipelineRun
 
@@ -20,17 +21,19 @@ runs_bp = Blueprint('runs', __name__)
 # ── LIST ──────────────────────────────────────────────────────────────────────
 
 @runs_bp.get('/api/runs')
+@jwt_required()
 def list_runs():
     """
     GET /api/runs
-    Returns all pipeline runs, newest first.
+    Returns the current user's pipeline runs, newest first.
 
     Optional query parameters:
       ?project=my-repo    → filter by project name
       ?provider=gitlab    → filter by provider
       ?status=failure     → filter by status
     """
-    query = PipelineRun.query
+    user_id = int(get_jwt_identity())
+    query = PipelineRun.query.filter_by(user_id=user_id)
 
     project  = request.args.get('project')
     provider = request.args.get('provider')
@@ -50,6 +53,7 @@ def list_runs():
 # ── CREATE ────────────────────────────────────────────────────────────────────
 
 @runs_bp.post('/api/runs')
+@jwt_required()
 def create_run():
     """
     POST /api/runs
@@ -75,6 +79,7 @@ def create_run():
         return jsonify({'error': f'Missing required fields: {missing}'}), 400
 
     run = PipelineRun(
+        user_id      = int(get_jwt_identity()),
         pipeline_id  = data['pipeline_id'],
         project_name = data['project_name'],
         branch       = data['branch'],
@@ -92,12 +97,14 @@ def create_run():
 # ── READ ONE ──────────────────────────────────────────────────────────────────
 
 @runs_bp.get('/api/runs/<int:run_id>')
+@jwt_required()
 def get_run(run_id: int):
     """
     GET /api/runs/<id>
     Returns one pipeline run by its database ID.
     """
+    user_id = int(get_jwt_identity())
     run = db.session.get(PipelineRun, run_id)
-    if not run:
+    if not run or run.user_id != user_id:
         return jsonify({'error': 'Run not found'}), 404
     return jsonify(run.to_dict())

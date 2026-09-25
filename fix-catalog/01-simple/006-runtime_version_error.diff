@@ -1,0 +1,27 @@
+# Aegis fix catalog #006 — Runtime version does not match `engines`
+#
+# Tier:       1 · Simple
+# Category:   runtime_version_error (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | error app@1.0.0: The engine "node" is incompatible with this module. Expected version ">=20". Got "16.20.2"
+#   | error Found incompatible module. requires node version >=20
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Updated node-version to 20 to match package.json engines.node=">=20" — running a different Node version silently breaks modules that use version-specific APIs
+#
+# Apply:      git apply 01-simple/006-runtime_version_error.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -22,7 +22,7 @@
+       - uses: actions/checkout@v4
+       - uses: actions/setup-node@v4
+         with:
+-          node-version: 16
++          node-version: '20'
+           cache: npm
+       - run: npm ci
+       - run: npm run build

@@ -8,6 +8,7 @@
 //   Simple       → fixers/simple/{syntax,environment,dependencies,build}
 //   Intermediate → fixers/intermediate/{git,pipeline,config,runtime,testing}
 //   Advanced     → fixers/advanced/{auth,docker,deployment,api,database}
+//   Code         → fixers/code/source (surgical edits to application source)
 
 import type { ErrorCategory } from './diagnostics';
 
@@ -537,6 +538,20 @@ import {
   fixGitLabReplicationSlotMonitor, fixGitLabReplicaHealthCheck, fixGitLabReplicationLagWait, fixGitLabCDCLagCheck,
 } from './fixers/advanced/database_gitlab';
 
+// ── Code — surgical edits to application source at log-referenced lines ────
+import {
+  fixUnusedImports, fixPythonUnusedImports, fixPreferConst, fixDebuggerStatements,
+  fixWhitespaceLint, fixFocusedTests, fixUnusedTsExpectError, fixNullDerefAtStackFrame,
+  fixMissingNpmPackage, fixMissingPythonPackage,
+  isAppSourceFile, logReferencedSourcePaths,
+} from './fixers/code/source';
+
+import { isYamlPath, yamlParseError } from './yamlCheck';
+
+/** Rule edits discarded by the last applyRuleBasedFixes() call because they
+ *  would have made a valid YAML file unparseable (diagnostics / tests). */
+export const rejectedRules: Array<{ path: string; explanation: string; error: string; before?: string; after?: string }> = [];
+
 // ── Orchestrator ─────────────────────────────────────────────────────────────
 
 export function applyRuleBasedFixes(
@@ -561,12 +576,36 @@ export function applyRuleBasedFixes(
       .map(f => [f.path, f.content]),
   );
   const explanations = new Map<string, string[]>();
+  rejectedRules.length = 0;
+  const yamlValid = new Map<string, boolean>();
   const confidences  = new Map<string, number[]>();
 
   function applyBatch(batch: RuleFix[]) {
     for (const fix of batch) {
       if (typeof fix.content !== 'string') continue;
       if (!fix.path || typeof fix.path !== 'string') continue;
+      // Idempotency: several rules are invoked from more than one section
+      // (always-run + category block). The same rule must not apply twice to a
+      // file — non-idempotent rules would insert their step/block again.
+      if (explanations.get(fix.path)?.includes(fix.explanation)) continue;
+      // Composition safety: one rule that breaks YAML must not poison every
+      // other rule's fix to the same file — drop just that rule's edit.
+      if (isYamlPath(fix.path)) {
+        const err = yamlParseError(fix.path, fix.content);
+        const prev = working.get(fix.path);
+        // Validity of the current working copy is cached — accepted edits are
+        // valid by construction, so each file is parsed at most once per edit.
+        let prevValid = yamlValid.get(fix.path);
+        if (prevValid === undefined) {
+          prevValid = prev === undefined || yamlParseError(fix.path, prev) === null;
+          yamlValid.set(fix.path, prevValid);
+        }
+        if (!err) yamlValid.set(fix.path, true);
+        if (err && prevValid) {
+          rejectedRules.push({ path: fix.path, explanation: fix.explanation, error: err, before: prev, after: fix.content });
+          continue;
+        }
+      }
       working.set(fix.path, fix.content);
       if (!explanations.has(fix.path)) { explanations.set(fix.path, []); confidences.set(fix.path, []); }
       explanations.get(fix.path)!.push(fix.explanation);
@@ -580,6 +619,17 @@ export function applyRuleBasedFixes(
     [...working.entries()]
       .filter(([path, content]) => path && typeof path === 'string' && typeof content === 'string')
       .map(([path, content]) => ({ path, content }));
+
+  // Application source is edited only by the surgical fixers in fixers/code,
+  // which act on the exact file:line a CI log names. The older runtime fixers
+  // rewrite whole files (every Promise.all, every `.prop`, TS syntax injected
+  // into plain .js) — they now see CI/config files only, or, where the rewrite
+  // preserves behaviour, only the source files the logs actually point at.
+  const referencedSources = logReferencedSourcePaths(logs, 50);
+  const isReferenced = (p: string) =>
+    referencedSources.some(r => r === p || r.endsWith(`/${p}`) || p.endsWith(`/${r}`));
+  const ciSnap = () => snap().filter(f => !isAppSourceFile(f.path));
+  const referencedSnap = () => snap().filter(f => !isAppSourceFile(f.path) || isReferenced(f.path));
 
   // ════════════════════════════════════════════════════════════════════════
   // SIMPLE — always-run rules (file-content based, safe for any category)
@@ -724,6 +774,7 @@ export function applyRuleBasedFixes(
   applyBatch(fixGitLabEnvironmentConfig(snap()));
   applyBatch(fixGitLabRulesNeverMatch(snap()));
   applyBatch(fixMissingDockerignore(snap()));
+  applyBatch(fixDockerMissingDockerignore(snap()));
   applyBatch(fixMissingSecretsContext(snap()));
   applyBatch(fixSecretToEnvMapping(snap()));
   applyBatch(fixEnvContextScope(snap()));
@@ -765,6 +816,7 @@ export function applyRuleBasedFixes(
 
   // Advanced always-run rules
   applyBatch(fixMissingDockerignore(snap()));
+  applyBatch(fixDockerMissingDockerignore(snap()));
   applyBatch(fixDockerBaseImagePin(snap()));
   applyBatch(fixEnableDockerBuildKit(snap()));
   applyBatch(fixSlackNotificationSecret(snap()));
@@ -906,6 +958,7 @@ export function applyRuleBasedFixes(
   if (hasCategory('missing_file')) {
     applyBatch(fixCreateMinimalDockerfile(snap()));
     applyBatch(fixMissingTsConfig(logs, snap()));
+    applyBatch(fixConfigMissingTsConfig(logs, snap()));
     applyBatch(fixMissingBuildScript(logs, snap()));
   }
 
@@ -951,6 +1004,7 @@ export function applyRuleBasedFixes(
 
   if (hasCategory('ssh_key_error')) {
     applyBatch(fixSSHKnownHosts(logs, snap()));
+    applyBatch(fixAdvancedSSHKnownHosts(logs, snap()));
     applyBatch(fixSSHDeployNonBlocking(snap()));
     applyBatch(fixSSHKeyFormatEd25519(logs, snap()));
     applyBatch(fixSSHAgentSocketForwarding(logs, snap()));
@@ -1021,6 +1075,7 @@ export function applyRuleBasedFixes(
     applyBatch(fixGoogleArtifactRegistryAuth(logs, snap()));
     applyBatch(fixAzureContainerRegistryAuth(logs, snap()));
     applyBatch(fixGitLabCrossProjectToken(logs, snap()));
+    applyBatch(fixAdvancedGitLabCrossProjectToken(logs, snap()));
   }
 
   if (hasCategory('node_version')) {
@@ -1099,6 +1154,7 @@ export function applyRuleBasedFixes(
     // Category 2: Compilation failure
     applyBatch(fixCompilationFailure(logs, snap()));
     applyBatch(fixMissingTsConfig(logs, snap()));
+    applyBatch(fixConfigMissingTsConfig(logs, snap()));
     applyBatch(fixTypeScriptPathAlias(logs, snap()));
     applyBatch(fixESMCJSConflict(logs, snap()));
     applyBatch(fixJavaCompilationError(logs, snap()));
@@ -1170,11 +1226,13 @@ export function applyRuleBasedFixes(
     applyBatch(fixScriptTypo(logs, snap()));
     applyBatch(fixIncorrectVariableName(logs, snap()));
     applyBatch(fixShallowCloneFetchDepth(logs, snap()));
+    applyBatch(fixGitShallowCloneFetchDepth(logs, snap()));
   }
 
   if (hasCategory('compilation_failure')) {
     applyBatch(fixCompilationFailure(logs, snap()));
     applyBatch(fixMissingTsConfig(logs, snap()));
+    applyBatch(fixConfigMissingTsConfig(logs, snap()));
     applyBatch(fixTypeScriptPathAlias(logs, snap()));
     applyBatch(fixESMCJSConflict(logs, snap()));
     applyBatch(fixJavaCompilationError(logs, snap()));
@@ -1237,7 +1295,7 @@ export function applyRuleBasedFixes(
     applyBatch(fixPythonRecursionLimit(logs, snap()));
     applyBatch(fixOpenFilesLimit(logs, snap()));
     applyBatch(fixSegmentationFault(logs, snap()));
-    applyBatch(fixNullReferenceException(logs, snap()));
+    applyBatch(fixNullReferenceException(logs, ciSnap()));
     applyBatch(fixJVMHeapConfig(logs, snap()));
     applyBatch(fixGradleJVMArgs(logs, snap()));
     applyBatch(fixGoMemoryTuning(logs, snap()));
@@ -1249,12 +1307,12 @@ export function applyRuleBasedFixes(
   }
 
   if (hasCategory('null_reference')) {
-    applyBatch(fixNullReferenceException(logs, snap()));
-    applyBatch(fixNullDerefOptionalChain(logs, snap()));
+    applyBatch(fixNullReferenceException(logs, ciSnap()));
+    applyBatch(fixNullDerefOptionalChain(logs, ciSnap()));
     applyBatch(fixStrictNullChecks(logs, snap()));
     applyBatch(fixPythonNoneCheck(logs, snap()));
     applyBatch(fixGoNilPointerDeref(logs, snap()));
-    applyBatch(fixRustUnwrapToExpect(logs, snap()));
+    applyBatch(fixRustUnwrapToExpect(logs, referencedSnap()));
     applyBatch(fixJavaNPEGuard(logs, snap()));
     applyBatch(fixCSharpNullConditional(logs, snap()));
     applyBatch(fixArrayBoundsCheck(logs, snap()));
@@ -1280,9 +1338,10 @@ export function applyRuleBasedFixes(
     applyBatch(fixJestTestHangTimeout(logs, snap()));
     applyBatch(fixMochaForceExit(logs, snap()));
     applyBatch(fixPlaywrightPageTimeout(logs, snap()));
-    applyBatch(fixNodeEventListenerLeak(logs, snap()));
+    applyBatch(fixNodeEventListenerLeak(logs, ciSnap()));
     applyBatch(fixAsyncRetryMaxCap(logs, snap()));
     applyBatch(fixJobTimeout(logs, snap()));
+    applyBatch(fixConfigJobTimeout(logs, snap()));
   }
 
   if (hasCategory('stack_overflow')) {
@@ -1307,11 +1366,11 @@ export function applyRuleBasedFixes(
   }
 
   if (hasCategory('unhandled_exception')) {
-    applyBatch(fixUnhandledRejection(logs, snap()));
+    applyBatch(fixUnhandledRejection(logs, ciSnap()));
     applyBatch(fixAsyncTryCatch(logs, snap()));
-    applyBatch(fixExpressErrorMiddleware(logs, snap()));
-    applyBatch(fixPromiseAllSettled(logs, snap()));
-    applyBatch(fixPythonExceptionLogging(logs, snap()));
+    applyBatch(fixExpressErrorMiddleware(logs, ciSnap()));
+    applyBatch(fixPromiseAllSettled(logs, ciSnap()));
+    applyBatch(fixPythonExceptionLogging(logs, referencedSnap()));
     applyBatch(fixJavaUncaughtExceptionHandler(logs, snap()));
     applyBatch(fixDotNetUnhandledException(logs, snap()));
     applyBatch(fixSentryRuntimeCapture(logs, snap()));
@@ -1374,6 +1433,7 @@ export function applyRuleBasedFixes(
     applyBatch(fixNoTestFiles(logs, snap()));
     applyBatch(fixCreateMinimalTest(logs, snap()));
     applyBatch(fixMissingVitestConfig(logs, snap()));
+    applyBatch(fixTestingMissingVitestConfig(logs, snap()));
     applyBatch(fixTestTimeout(logs, snap()));
     applyBatch(fixStaleMocks(logs, snap()));
     applyBatch(fixMissingDBService(logs, snap()));
@@ -1425,6 +1485,7 @@ export function applyRuleBasedFixes(
 
   if (hasCategory('job_timeout')) {
     applyBatch(fixJobTimeout(logs, snap()));
+    applyBatch(fixConfigJobTimeout(logs, snap()));
     applyBatch(fixParallelJobTimeouts(snap()));
     applyBatch(fixStepLevelTimeout(logs, snap()));
     applyBatch(fixGitLabJobTimeout(logs, snap()));
@@ -1536,6 +1597,7 @@ export function applyRuleBasedFixes(
     applyBatch(fixGitUserConfig(logs, snap()));
     applyBatch(fixGitHubActionsToken(logs, snap()));
     applyBatch(fixGitRemoteWithToken(logs, snap()));
+    applyBatch(fixAdvancedGitRemoteWithToken(logs, snap()));
     applyBatch(fixMissingPermissions(logs, snap()));
     applyBatch(fixInvalidBranchReference(logs, snap()));
     applyBatch(fixRejectedCommit(logs, snap()));
@@ -1561,7 +1623,9 @@ export function applyRuleBasedFixes(
 
   if (hasCategory('git_access_denied')) {
     applyBatch(fixGitRemoteWithToken(logs, snap()));
+    applyBatch(fixAdvancedGitRemoteWithToken(logs, snap()));
     applyBatch(fixSSHKnownHosts(logs, snap()));
+    applyBatch(fixAdvancedSSHKnownHosts(logs, snap()));
     applyBatch(fixGitLabDeployKey(logs, snap()));
     applyBatch(fixGitHubAppTokenGen(logs, snap()));
     applyBatch(fixPrivateSubmoduleSSH(logs, snap()));
@@ -1823,11 +1887,14 @@ export function applyRuleBasedFixes(
 
   if (hasCategory('missing_config_file')) {
     applyBatch(fixMissingTsConfig(logs, snap()));
+    applyBatch(fixConfigMissingTsConfig(logs, snap()));
     applyBatch(fixMissingViteConfig(logs, snap()));
     applyBatch(fixMissingVitestConfig(logs, snap()));
+    applyBatch(fixTestingMissingVitestConfig(logs, snap()));
     applyBatch(fixMissingNvmrc(logs, snap()));
     applyBatch(fixMissingPyprojectToml(logs, snap()));
     applyBatch(fixMissingDockerignore(snap()));
+    applyBatch(fixDockerMissingDockerignore(snap()));
     applyBatch(fixMissingGitignore(logs, snap()));
     applyBatch(fixMissingPostcssConfig(logs, snap()));
     applyBatch(fixMissingBabelConfig(logs, snap()));
@@ -2275,6 +2342,7 @@ export function applyRuleBasedFixes(
 
   // Intermediate cross-category
   applyBatch(fixShallowCloneFetchDepth(logs, snap()));
+  applyBatch(fixGitShallowCloneFetchDepth(logs, snap()));
   applyBatch(fixInvalidBranchReference(logs, snap()));
   applyBatch(fixRejectedCommit(logs, snap()));
   applyBatch(fixCircularDependency(logs, snap()));
@@ -2285,11 +2353,12 @@ export function applyRuleBasedFixes(
   applyBatch(fixMissingPermissions(logs, snap()));
   applyBatch(fixAdvancedOidc(logs, snap()));
   applyBatch(fixJobTimeout(logs, snap()));
+  applyBatch(fixConfigJobTimeout(logs, snap()));
   applyBatch(fixMissingConcurrencyGroup(snap()));
-  applyBatch(fixNullReferenceException(logs, snap()));
+  applyBatch(fixNullReferenceException(logs, ciSnap()));
   applyBatch(fixTypeMismatch(logs, snap()));
   applyBatch(fixNodeHeapOOM(logs, snap()));
-  applyBatch(fixUnhandledRejection(logs, snap()));
+  applyBatch(fixUnhandledRejection(logs, ciSnap()));
   applyBatch(fixUnitTestFailure(logs, snap()));
   applyBatch(fixIntegrationTestFailure(logs, snap()));
   applyBatch(fixTestEnvironmentMisconfig(logs, snap()));
@@ -2297,6 +2366,7 @@ export function applyRuleBasedFixes(
   applyBatch(fixGitLFSCheckout(logs, snap()));
   applyBatch(fixGitUserConfig(logs, snap()));
   applyBatch(fixSSHKnownHosts(logs, snap()));
+  applyBatch(fixAdvancedSSHKnownHosts(logs, snap()));
   applyBatch(fixTestTimeout(logs, snap()));
   applyBatch(fixMissingJestConfig(logs, snap()));
   // Testing cross-category — extended
@@ -2352,6 +2422,7 @@ export function applyRuleBasedFixes(
   applyBatch(fixGitCredentialHelper(logs, snap()));
   applyBatch(fixMissingGitTags(logs, snap()));
   applyBatch(fixShallowCloneFetchDepth(logs, snap()));
+  applyBatch(fixGitShallowCloneFetchDepth(logs, snap()));
   applyBatch(fixAnnotatedTagForRelease(logs, snap()));
   applyBatch(fixFetchAllBranches(logs, snap()));
   applyBatch(fixGitGCDiskSpace(logs, snap()));
@@ -2365,6 +2436,7 @@ export function applyRuleBasedFixes(
   applyBatch(fixDefaultBranchRename(logs, snap()));
   applyBatch(fixMissingUpstreamBranch(logs, snap()));
   applyBatch(fixSSHKnownHosts(logs, snap()));
+  applyBatch(fixAdvancedSSHKnownHosts(logs, snap()));
   applyBatch(fixGitLabDeployKey(logs, snap()));
   applyBatch(fixGitLabSubmoduleStrategy(logs, snap()));
   applyBatch(fixSubmoduleUpdateInit(logs, snap()));
@@ -2378,6 +2450,7 @@ export function applyRuleBasedFixes(
   applyBatch(fixSparseCheckout(logs, snap()));
   applyBatch(fixPackageRegistryAuth(logs, snap()));
   applyBatch(fixGitLabCrossProjectToken(logs, snap()));
+  applyBatch(fixAdvancedGitLabCrossProjectToken(logs, snap()));
   applyBatch(fixPlaywrightBrowserInstall(snap()));
   applyBatch(fixCypressCIDependencies(snap()));
   applyBatch(fixMissingPrettierConfig(logs, snap()));
@@ -2425,6 +2498,7 @@ export function applyRuleBasedFixes(
   applyBatch(fixActionInputTypeMismatch(logs, snap()));
   applyBatch(fixMissingStepsKey(logs, snap()));
   applyBatch(fixMissingTsConfig(logs, snap()));
+  applyBatch(fixConfigMissingTsConfig(logs, snap()));
   applyBatch(fixMissingViteConfig(logs, snap()));
   applyBatch(fixMissingNvmrc(logs, snap()));
   applyBatch(fixMissingPyprojectToml(logs, snap()));
@@ -2731,6 +2805,7 @@ export function applyRuleBasedFixes(
   applyBatch(fixAPIVersionHeader(logs, snap()));
   applyBatch(fixGHCLIAuth(logs, snap()));
   applyBatch(fixGitLabCrossProjectToken(logs, snap()));
+  applyBatch(fixAdvancedGitLabCrossProjectToken(logs, snap()));
   applyBatch(fixGitLabDetachedHead(logs, snap()));
   // Docker cross-category — Section A (build)
   applyBatch(fixDockerBuildContextTooLarge(logs, snap()));
@@ -2882,10 +2957,10 @@ export function applyRuleBasedFixes(
   applyBatch(fixRESTIdempotencyHeader(logs, snap()));
   applyBatch(fixRESTResponseTimeLogging(logs, snap()));
   // Runtime cross-category
-  applyBatch(fixNullDerefOptionalChain(logs, snap()));
+  applyBatch(fixNullDerefOptionalChain(logs, ciSnap()));
   applyBatch(fixPythonNoneCheck(logs, snap()));
   applyBatch(fixGoNilPointerDeref(logs, snap()));
-  applyBatch(fixRustUnwrapToExpect(logs, snap()));
+  applyBatch(fixRustUnwrapToExpect(logs, referencedSnap()));
   applyBatch(fixJavaNPEGuard(logs, snap()));
   applyBatch(fixCSharpNullConditional(logs, snap()));
   applyBatch(fixArrayBoundsCheck(logs, snap()));
@@ -2898,7 +2973,7 @@ export function applyRuleBasedFixes(
   applyBatch(fixLoopIterationGuard(logs, snap()));
   applyBatch(fixPythonTestHangTimeout(logs, snap()));
   applyBatch(fixJestTestHangTimeout(logs, snap()));
-  applyBatch(fixNodeEventListenerLeak(logs, snap()));
+  applyBatch(fixNodeEventListenerLeak(logs, ciSnap()));
   applyBatch(fixAsyncRetryMaxCap(logs, snap()));
   applyBatch(fixJVMStackSize(logs, snap()));
   applyBatch(fixPythonConfTestRecursion(logs, snap()));
@@ -2917,14 +2992,29 @@ export function applyRuleBasedFixes(
   applyBatch(fixValgrindMemCheck(logs, snap()));
   applyBatch(fixCoreDumpUpload(logs, snap()));
   applyBatch(fixNodeNativeAddonCrash(logs, snap()));
-  applyBatch(fixExpressErrorMiddleware(logs, snap()));
-  applyBatch(fixPromiseAllSettled(logs, snap()));
-  applyBatch(fixPythonExceptionLogging(logs, snap()));
+  applyBatch(fixExpressErrorMiddleware(logs, ciSnap()));
+  applyBatch(fixPromiseAllSettled(logs, ciSnap()));
+  applyBatch(fixPythonExceptionLogging(logs, referencedSnap()));
   applyBatch(fixJavaUncaughtExceptionHandler(logs, snap()));
   applyBatch(fixDotNetUnhandledException(logs, snap()));
   applyBatch(fixSentryRuntimeCapture(logs, snap()));
   applyBatch(fixBrowserGlobalErrorHandler(logs, snap()));
   applyBatch(fixRuntimeExceptionDiagnostics(logs, snap()));
+
+  // ════════════════════════════════════════════════════════════════════════
+  // CODE — surgical source edits (all log-gated: each fires only when the CI
+  // output names the exact problem, and edits only the file/line it names)
+  // ════════════════════════════════════════════════════════════════════════
+  applyBatch(fixUnusedImports(logs, snap()));
+  applyBatch(fixPythonUnusedImports(logs, snap()));
+  applyBatch(fixPreferConst(logs, snap()));
+  applyBatch(fixDebuggerStatements(logs, snap()));
+  applyBatch(fixWhitespaceLint(logs, snap()));
+  applyBatch(fixFocusedTests(logs, snap()));
+  applyBatch(fixUnusedTsExpectError(logs, snap()));
+  applyBatch(fixNullDerefAtStackFrame(logs, snap()));
+  applyBatch(fixMissingNpmPackage(logs, snap()));
+  applyBatch(fixMissingPythonPackage(logs, snap()));
 
   // Build output — one RuleFix per modified file
   return [...explanations.entries()].map(([path, exps]) => ({

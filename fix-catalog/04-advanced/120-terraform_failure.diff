@@ -1,0 +1,41 @@
+# Aegis fix catalog #120 — Terraform apply without init/plan
+#
+# Tier:       4 · Advanced
+# Category:   terraform_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error: Backend initialization required, please run "terraform init"
+#   | Error: terraform plan failed — Terraform exited with code 1
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added Terraform CI env vars — TF_IN_AUTOMATION disables prompts
+#     - TF_INPUT=false prevents interactive input
+#     - TF_CLI_ARGS=-no-color produces clean logs
+#     - plugin cache reduces provider download time
+#     - Added terraform plan -out=tfplan before apply — separates plan inspection from apply
+#     - -detailed-exitcode causes the step to fail if no changes are expected but changes are detected
+#
+# Apply:      git apply 04-advanced/120-terraform_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,10 +14,16 @@
+ env:
+   CI: 'true'
+   NODE_ENV: test
++  TF_CLI_ARGS: -no-color
++  TF_IN_AUTOMATION: true
++  TF_INPUT: false
++  TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+ jobs:
+   build:
+     runs-on: ubuntu-latest
+     timeout-minutes: 15
+     steps:
+       - uses: actions/checkout@v4
+-      - run: terraform apply -auto-approve
++      - run: terraform plan -out=tfplan -detailed-exitcode
++          echo "Review the plan above — approving in 30s (cancel the run to abort)"
++          terraform apply tfplan -auto-approve

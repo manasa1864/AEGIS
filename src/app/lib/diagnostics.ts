@@ -1490,6 +1490,7 @@ const PATTERNS: Array<{
       /third.?party.*service.*fail/i, /external.*service.*unavailable/i,
       /integration.*failed.*upstream/i,
       /snyk.*unavailable|datadog.*error|newrelic.*fail/i,
+      /(?:snyk|datadog|new.?relic|sentry|codecov|sonar)\b.*(?:fail|error|unavailable|timeout|503)/i,
     ],
     relevantFiles: [],
     description: 'Third-party external service integration failure',
@@ -1548,7 +1549,7 @@ const PATTERNS: Array<{
   {
     category: 'rust_build_failure',
     patterns: [
-      /error\[E\d+\].*rust/i, /cargo.*build.*failed/i,
+      /error\[E\d{4}\]/, /error\[E\d+\].*rust/i, /cargo.*build.*failed/i,
       /error: could not compile/i, /cannot find.*in this scope.*rust/i,
       /the crate.*is not compiled/i, /cargo.*error.*Compilation failed/i,
     ],
@@ -1858,6 +1859,7 @@ const PATTERNS: Array<{
     category: 'artifact_missing',
     patterns: [
       /artifact.*not found.*download/i, /No artifact.*found with name/i,
+      /Artifact not found for name/i, /Unable to find any artifacts/i,
       /artifact.*expired/i, /download.*artifact.*failed.*not exist/i,
     ],
     relevantFiles: ['.github/workflows/'],
@@ -2205,6 +2207,16 @@ const PATTERNS: Array<{
     description: 'Environment variable mapping or injection failure',
   },
 ];
+
+/** Read-only view of the diagnosis pattern table — exported for the
+ *  category-coverage test so the declared categories, the pattern table,
+ *  and the README can never silently drift apart. */
+export const DIAGNOSIS_PATTERNS: ReadonlyArray<{
+  category: ErrorCategory;
+  patterns: RegExp[];
+  relevantFiles: string[];
+  description: string;
+}> = PATTERNS;
 
 export function categorizeError(logs: string, stepNames: string[] = []): ErrorDiagnosis {
   // Prepend step names — they are high-signal (e.g. "Login to Docker Hub")

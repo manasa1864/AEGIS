@@ -1,9 +1,12 @@
 import type { AnalysisResult } from './gemini';
+import { extractJson } from './jsonExtract';
+import { geminiGenerateUrl, geminiText } from './models';
+import { sanitizeForAI } from './sanitize';
 
 // Google Cloud Agent Builder / Vertex AI Gemini with Google Search Grounding
 //
 // APIs used (VITE_GCLOUD_KEY):
-//   • Vertex AI Gemini (gemini-2.0-flash) — generativelanguage.googleapis.com
+//   • Gemini (see GEMINI_MODEL in models.ts) — generativelanguage.googleapis.com
 //   • Google Search Grounding tool — lets the model look up real CI/CD docs,
 //     Stack Overflow answers, and known issues before generating fixes
 //   • Grounding metadata — response includes source URLs used during reasoning
@@ -28,7 +31,7 @@ export async function analyzeWithGrounding(
   files: Array<{ path: string; content: string }>
 ): Promise<GroundedAnalysisResult | null> {
   const filesText = files
-    .map(f => `### ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)
+    .map(f => `### ${f.path}\n\`\`\`\n${sanitizeForAI(f.content)}\n\`\`\``)
     .join('\n\n');
 
   const prompt = `You are an AI agent that analyzes CI/CD pipeline failures.
@@ -70,7 +73,7 @@ Rules:
 
   let res: Response;
   try {
-    res = await fetch('/api/gcloud/v1beta/models/gemini-2.0-flash:generateContent', {
+    res = await fetch(geminiGenerateUrl('/api/gcloud'), {
       method: 'POST',
       headers: {
         'x-goog-api-key': gcloudKey,
@@ -81,7 +84,9 @@ Rules:
         tools: [{ google_search: {} }],
         generationConfig: {
           temperature: 0.1,
-          maxOutputTokens: 2048,
+          // Fixes carry COMPLETE file contents (and thinking tokens count toward
+          // this budget on current Flash models) — 2048 truncated the JSON.
+          maxOutputTokens: 8192,
         },
       }),
     });
@@ -91,8 +96,11 @@ Rules:
 
   if (!res.ok) return null;
 
-  const data = await res.json();
-  const text: string = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  // A misrouted proxy (e.g. SPA fallback returning index.html) must not throw
+  // and abort the whole healing run — just fall through to the next provider.
+  const data = await res.json().catch(() => null);
+  if (!data) return null;
+  const text = geminiText(data);
 
   // Extract grounding source URLs if present
   const sources: GroundingSource[] = (
@@ -101,18 +109,13 @@ Rules:
     chunk.web?.uri ? [{ url: chunk.web.uri, title: chunk.web.title ?? chunk.web.uri }] : []
   );
 
-  try {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return null;
-    const parsed = JSON.parse(match[0]) as Partial<AnalysisResult>;
-    return {
-      analysis: parsed.analysis ?? '',
-      confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 75,
-      fixes: parsed.fixes ?? [],
-      ranked_alternatives: parsed.ranked_alternatives ?? [],
-      sources,
-    };
-  } catch {
-    return null;
-  }
+  const parsed = extractJson<Partial<AnalysisResult>>(text);
+  if (!parsed) return null;
+  return {
+    analysis: parsed.analysis ?? '',
+    confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 75,
+    fixes: parsed.fixes ?? [],
+    ranked_alternatives: parsed.ranked_alternatives ?? [],
+    sources,
+  };
 }

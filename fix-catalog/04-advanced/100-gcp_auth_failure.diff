@@ -1,0 +1,51 @@
+# Aegis fix catalog #100 — gcloud without authentication
+#
+# Tier:       4 · Advanced
+# Category:   gcp_auth_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | ERROR: (gcloud.run.deploy) You do not currently have an active account selected.
+#   | GOOGLE_APPLICATION_CREDENTIALS is not set — gcloud auth failed
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added GCP CI env vars — CLOUDSDK_CORE_DISABLE_PROMPTS=1 prevents gcloud from hanging on interactive prompts
+#     - CLOUDSDK_PYTHON_SITEPACKAGES avoids gcloud SDK Python path issues
+#     - Added Cloud Run revision rollback (if: failure()) — routes 100% traffic back to the last stable revision when new revision deployment fails
+#
+# Apply:      git apply 04-advanced/100-gcp_auth_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,6 +14,8 @@
+ env:
+   CI: 'true'
+   NODE_ENV: test
++  CLOUDSDK_CORE_DISABLE_PROMPTS: '1'
++  CLOUDSDK_PYTHON_SITEPACKAGES: '1'
+ jobs:
+   build:
+     runs-on: ubuntu-latest
+@@ -25,4 +27,21 @@
+           node-version: 20
+           cache: npm
+       - run: npm ci
++      - name: Cloud Run rollback to previous revision
++        if: failure()
++        run: |
++          echo "=== Rolling back Cloud Run to previous revision ==="
++          PREV=$(gcloud run revisions list \
++            --service "${{ env.SERVICE_NAME }}" \
++            --region "${{ env.GCP_REGION }}" \
++            --format 'value(name)' --limit 2 2>/dev/null | tail -1)
++          if [ -n "$PREV" ]; then
++            gcloud run services update-traffic "${{ env.SERVICE_NAME }}" \
++              --to-revisions="$PREV=100" \
++              --region "${{ env.GCP_REGION }}"
++            echo "Rolled back to $PREV"
++          else
++            echo "No previous revision found"
++          fi
++        continue-on-error: true
+       - run: gcloud run deploy app --source . --region us-central1

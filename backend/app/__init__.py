@@ -43,6 +43,8 @@ def _run_migrations(app: Flask) -> None:
         "ALTER TABLE healing_events ADD COLUMN IF NOT EXISTS postmortem TEXT",
         "ALTER TABLE healing_events ADD COLUMN IF NOT EXISTS recovery_time_ms INTEGER",
         "ALTER TABLE healing_events ADD COLUMN IF NOT EXISTS sources JSON",
+        # pipeline_runs — user_id added for per-user scoping
+        "ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)",
     ]
     with app.app_context():
         with db.engine.connect() as conn:

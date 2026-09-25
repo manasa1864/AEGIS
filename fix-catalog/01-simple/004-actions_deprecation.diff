@@ -1,0 +1,35 @@
+# Aegis fix catalog #004 — Actions pinned to deprecated runtimes
+#
+# Tier:       1 · Simple
+# Category:   actions_deprecation
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Warning: Node.js 16 actions are deprecated. Please update the following actions to use Node.js 20: actions/checkout@v2, actions/setup-node@v2
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Upgraded deprecated action versions (v1-v3 → v4/v5) + added FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 — GitHub is forcing Node.js 20 actions to run on Node.js 24 starting June 2026
+#     - old action versions fail with module compatibility errors
+#
+# Apply:      git apply 01-simple/004-actions_deprecation.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,13 +14,14 @@
+ env:
+   CI: 'true'
+   NODE_ENV: test
++  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+ jobs:
+   build:
+     runs-on: ubuntu-latest
+     timeout-minutes: 15
+     steps:
+-      - uses: actions/checkout@v2
+-      - uses: actions/setup-node@v2
++      - uses: actions/checkout@v4
++      - uses: actions/setup-node@v4
+         with:
+           node-version: 20
+           cache: npm

@@ -17,6 +17,12 @@ from ..models.user import User
 auth_bp = Blueprint('auth', __name__)
 
 
+def _str_field(data: dict, key: str) -> str:
+    """Read a JSON field as a string — null/number/object values become ''."""
+    value = data.get(key)
+    return value if isinstance(value, str) else ''
+
+
 @auth_bp.post('/api/auth/register')
 def register():
     """
@@ -24,13 +30,13 @@ def register():
     Body: { "email": "...", "password": "...", "name": "..." }
     Returns: { "token": "...", "user": { id, name, email } }
     """
-    data = request.get_json()
-    if not data:
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
         return jsonify({'error': 'Request body must be JSON'}), 400
 
-    email    = data.get('email', '').strip().lower()
-    password = data.get('password', '')
-    name     = data.get('name', '').strip()
+    email    = _str_field(data, 'email').strip().lower()
+    password = _str_field(data, 'password')
+    name     = _str_field(data, 'name').strip()
 
     if not email or not password:
         return jsonify({'error': 'FIELDS_REQUIRED :: email and password'}), 400
@@ -54,12 +60,12 @@ def login():
     Body: { "email": "...", "password": "..." }
     Returns: { "token": "...", "user": { id, name, email } }
     """
-    data = request.get_json()
-    if not data:
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
         return jsonify({'error': 'Request body must be JSON'}), 400
 
-    email    = data.get('email', '').strip().lower()
-    password = data.get('password', '')
+    email    = _str_field(data, 'email').strip().lower()
+    password = _str_field(data, 'password')
 
     if not email or not password:
         return jsonify({'error': 'FIELDS_REQUIRED :: email and password'}), 400

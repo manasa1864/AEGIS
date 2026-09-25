@@ -22,8 +22,10 @@ import {
   decideAutoHeal,
 } from './tools';
 import type { PipelineContext, HealingPlan, ReasoningStep } from './types';
+import { extractJson } from '../jsonExtract';
+import { geminiGenerateUrl } from '../models';
 
-const GEMINI_URL = '/api/gemini/v1beta/models/gemini-2.0-flash:generateContent';
+const GEMINI_URL = geminiGenerateUrl();
 const MAX_TURNS = 10; // safety limit to prevent runaway loops
 
 const SYSTEM_PROMPT = `You are Aegis, an AI Site Reliability Engineer specialized in CI/CD pipeline healing.
@@ -121,10 +123,9 @@ ${context.logs.slice(-800)}`;
       const textPart = parts.find((p): p is TextPart => 'text' in p);
       if (!textPart) return null;
 
-      try {
-        const match = textPart.text.match(/\{[\s\S]*\}/);
-        if (!match) return null;
-        const parsed = JSON.parse(match[0]);
+      {
+        const parsed = extractJson<Record<string, never>>(textPart.text) as Record<string, unknown> | null;
+        if (!parsed) return null;
         return {
           rootCause:    parsed.rootCause    ?? 'Unknown',
           severity:     parsed.severity     ?? 'medium',
@@ -132,9 +133,7 @@ ${context.logs.slice(-800)}`;
           autoHealable: parsed.autoHealable ?? false,
           estimatedTime: parsed.estimatedTime ?? 'Unknown',
           reasoning,
-        };
-      } catch {
-        return null;
+        } as HealingPlan;
       }
     }
 

@@ -2,7 +2,7 @@
 // Covers: missing env vars, undefined secrets/tokens, incorrect env values,
 // wrong .env configuration, variable scope issues — GitHub Actions and GitLab CI.
 
-import { RuleFix, isGitHubWorkflow, isGitLabCI, injectWorkflowLevelBlock, extractSecretRefs } from '../helpers';
+import { RuleFix, isGitHubWorkflow, isGitLabCI, injectWorkflowLevelBlock, extractSecretRefs, declareJobOutputs } from '../helpers';
 
 // ── CATEGORY 1: MISSING ENVIRONMENT VARIABLE ─────────────────────────────────
 
@@ -721,13 +721,16 @@ export function fixStepOutputScopeError(files: Array<{ path: string; content: st
     const refs = [...f.content.matchAll(/\$\{\{\s*steps\.([\w-]+)\./g)].map(m => m[1]);
     const bad  = [...new Set(refs)].filter(id => !stepIds.has(id));
     if (bad.length === 0) continue;
-    let content = f.content;
-    for (const id of bad) {
-      content = content.replace(
-        new RegExp(`(\\$\\{\\{\\s*steps\\.${id}\\.)`, 'g'),
-        `# aegis: step id '${id}' not found — add 'id: ${id}' to the producing step\n            $1`,
-      );
+    // Annotate on a separate comment line above each reference — never split
+    // the ${{ steps.x... }} expression itself, which broke it at runtime.
+    const lines = f.content.split('\n');
+    const out: string[] = [];
+    for (const line of lines) {
+      const missing = bad.find(id => new RegExp(`\\$\\{\\{\\s*steps\\.${id}\\.`).test(line));
+      if (missing) out.push(`${line.match(/^\s*/)![0]}# aegis: step id '${missing}' not found — add 'id: ${missing}' to the producing step`);
+      out.push(line);
     }
+    const content = out.join('\n');
     if (content !== f.content)
       fixes.push({ path: f.path, content, explanation: `Flagged references to undeclared step IDs [${bad.join(', ')}] — steps.ID.outputs.VAR returns empty string when the step has no matching id:`, confidence: 100 });
   }
@@ -741,22 +744,9 @@ export function fixMissingJobOutputsDeclaration(files: Array<{ path: string; con
     if (!isGitHubWorkflow(f.path)) continue;
     if (!f.content.includes('>> $GITHUB_OUTPUT') && !f.content.includes('>>$GITHUB_OUTPUT')) continue;
     if (/^\s{4}outputs:/m.test(f.content)) continue;
-    const names = [...f.content.matchAll(/echo\s+"?(\w+)=[^"\n]*"?\s*>>\s*\$?GITHUB_OUTPUT/gm)].map(m => m[1]);
-    if (names.length === 0) continue;
-    const lines = f.content.split('\n');
-    const out: string[] = [];
-    let injected = false;
-    for (let i = 0; i < lines.length; i++) {
-      out.push(lines[i]);
-      if (!injected && /^\s{4}runs-on:/.test(lines[i])) {
-        out.push('    outputs:');
-        for (const name of names)
-          out.push(`      ${name}: \${{ steps.<step-id>.outputs.${name} }}`);
-        injected = true;
-      }
-    }
-    if (injected)
-      fixes.push({ path: f.path, content: out.join('\n'), explanation: `Added outputs: block for [${names.join(', ')}] — values written to GITHUB_OUTPUT are only accessible to other jobs when declared in the job's outputs: section`, confidence: 100 });
+    const declared = declareJobOutputs(f.content);
+    if (declared)
+      fixes.push({ path: f.path, content: declared.content, explanation: `Added outputs: block for [${declared.names.join(', ')}] — values written to GITHUB_OUTPUT are only accessible to other jobs when declared in the job's outputs: section`, confidence: 100 });
   }
   return fixes;
 }

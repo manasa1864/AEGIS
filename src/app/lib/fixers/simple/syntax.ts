@@ -10,6 +10,7 @@
 // quoting in env blocks, cron syntax, multiline run scripts, GitLab rules migration.
 
 import { RuleFix, isGitHubWorkflow, isGitLabCI, isYAML, insertStepBefore } from '../helpers';
+import { yamlParseError } from '../../yamlCheck';
 
 // ── YAML Indentation ──────────────────────────────────────────────────────────
 
@@ -19,9 +20,25 @@ export function fixYamlTabIndentation(files: Array<{ path: string; content: stri
   for (const f of files) {
     if (!isYAML(f.path)) continue;
     if (!/^\t/m.test(f.content)) continue;
+    // Expand each tab to 2 spaces — but in files that MIX tabs and spaces a
+    // tab often stood for "one level deeper than the line above". A line under
+    // a block-opening `key:` must end up deeper than that key, or it silently
+    // becomes its sibling (valid YAML, wrong structure).
+    let prevIndent = -1;
+    let prevOpens = false;
     const fixed = f.content.split('\n').map(line => {
-      const m = line.match(/^(\t+)(.*)/);
-      return m ? '  '.repeat(m[1].length) + m[2] : line;
+      const m = line.match(/^([\t ]*)(.*)$/)!;
+      let out = line;
+      if (m[1].includes('\t')) {
+        let indent = m[1].replace(/\t/g, '  ').length;
+        if (prevOpens && indent <= prevIndent) indent = prevIndent + 2;
+        out = ' '.repeat(indent) + m[2];
+      }
+      if (m[2].trim() && !m[2].startsWith('#')) {
+        prevIndent = out.match(/^ */)![0].length;
+        prevOpens = /:\s*$/.test(m[2]);
+      }
+      return out;
     }).join('\n');
     if (fixed !== f.content)
       fixes.push({ path: f.path, content: fixed, explanation: 'Replaced tab indentation with 2-space — YAML requires spaces, tabs cause parse errors in all YAML parsers', confidence: 100 });
@@ -35,6 +52,10 @@ export function fixYamlIndentationDepth(files: Array<{ path: string; content: st
   const fixes: RuleFix[] = [];
   for (const f of files) {
     if (!isGitHubWorkflow(f.path)) continue;
+    // Indentation width is irrelevant to YAML as long as it is consistent, and
+    // halving leading spaces is not structure-preserving (sequence dashes).
+    // Only act on a file that does NOT parse, and only keep the result if it does.
+    if (yamlParseError(f.path, f.content) === null) continue;
     const indentedLines = f.content.split('\n').filter(l => /^ {4}/.test(l));
     if (indentedLines.length < 5) continue;
     const use4 = indentedLines.filter(l => /^ {4}[^ ]/.test(l) || /^ {8}[^ ]/.test(l)).length;
@@ -47,7 +68,7 @@ export function fixYamlIndentationDepth(files: Array<{ path: string; content: st
       const spaces = m[1].length;
       return ' '.repeat(Math.round(spaces / 2)) + m[2];
     }).join('\n');
-    if (fixed !== f.content)
+    if (fixed !== f.content && yamlParseError(f.path, fixed) === null)
       fixes.push({ path: f.path, content: fixed, explanation: 'Normalised indentation from 4-space to 2-space — GitHub Actions convention is 2-space; inconsistent depth can confuse some parsers', confidence: 90 });
   }
   return fixes;
@@ -177,25 +198,27 @@ export function fixStepUsesAndRun(files: Array<{ path: string; content: string }
     const lines = f.content.split('\n');
     const out: string[] = [];
     let modified = false;
-    let skipNext = false;
     for (let i = 0; i < lines.length; i++) {
-      if (skipNext) {
-        out.push(`        # aegis-removed (conflict with uses:): ${lines[i]}`);
-        while (i + 1 < lines.length && /^\s{10,}/.test(lines[i + 1])) {
-          i++;
-          out.push(`        # aegis-removed: ${lines[i]}`);
-        }
-        skipNext = false;
-        modified = true;
-        continue;
-      }
-      if (/^\s+uses:\s+\S/.test(lines[i]) && i + 1 < lines.length && /^\s+run:/.test(lines[i + 1])) {
-        skipNext = true;
-      }
       out.push(lines[i]);
+      // `- uses: x` (or a `uses:` key of a step) immediately followed by `run:`
+      const uses = lines[i].match(/^(\s*)(- +)?uses:\s+\S/);
+      const run = lines[i + 1]?.match(/^(\s+)run:/);
+      if (uses && run) {
+        const dashCol = uses[2] ? uses[1].length : uses[1].length - 2;
+        if (dashCol >= 0 && run[1].length === dashCol + 2) {
+          // Move the command into its own step instead of discarding it.
+          i++;
+          out.push(`${' '.repeat(dashCol)}- ${lines[i].trimStart()}`);
+          // carry a multi-line `run: |` body along with it
+          while (i + 1 < lines.length && lines[i + 1].trim() !== '' && lines[i + 1].match(/^ */)![0].length > run[1].length) {
+            out.push(lines[++i]);
+          }
+          modified = true;
+        }
+      }
     }
     if (modified)
-      fixes.push({ path: f.path, content: out.join('\n'), explanation: 'Removed conflicting run: from steps that also have uses: — a step cannot have both; the run: block is commented out and must be moved to a separate step', confidence: 100 });
+      fixes.push({ path: f.path, content: out.join('\n'), explanation: 'Split a step that had both uses: and run: into two steps — a single step may call an action OR run a shell command, never both; the command now runs as its own step right after the action', confidence: 100 });
   }
   return fixes;
 }
@@ -206,34 +229,53 @@ export function fixDuplicateYamlKey(files: Array<{ path: string; content: string
   for (const f of files) {
     if (!isYAML(f.path)) continue;
     const lines = f.content.split('\n');
-    const seenKeys = new Set<string>();
+    // One frame per open mapping: its key column and the keys seen in it.
+    // A "- " list item opens a fresh mapping, so sibling items never collide.
+    const frames: Array<{ col: number; keys: Set<string> }> = [];
     const out: string[] = [];
     let modified = false;
     let skipBlock = false;
     let skipIndent = 0;
+    let inBlockScalar = -1; // column of a `key: |` whose literal body must not be parsed
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      // Exit skip when we return to same or lower indent
+      const indent = line.match(/^( *)/)?.[1].length ?? 0;
       if (skipBlock) {
-        const indent = line.match(/^( *)/)?.[1].length ?? 0;
         if (line.trim() && indent <= skipIndent) skipBlock = false;
-        if (skipBlock) { out.push(`# aegis-fix: duplicate removed: ${line}`); modified = true; continue; }
+        if (skipBlock) { out.push(`${' '.repeat(skipIndent)}# aegis-fix: duplicate removed: ${line.trim()}`); modified = true; continue; }
       }
-      const m = line.match(/^([\w-]+):/);
-      if (m) {
-        if (seenKeys.has(m[1])) {
-          out.push(`# aegis-fix: duplicate key removed: ${line}`);
-          modified = true;
-          skipBlock = true;
-          skipIndent = 0;
-          continue;
+      if (inBlockScalar >= 0) {
+        if (!line.trim() || indent > inBlockScalar) { out.push(line); continue; }
+        inBlockScalar = -1;
+      }
+      // a new YAML document (k8s manifests, compose overrides) starts fresh
+      if (/^(---|\.\.\.)\s*$/.test(line)) { frames.length = 0; out.push(line); continue; }
+      const m = line.match(/^( *)(- +)?([\w.-]+):(?:\s|$)/);
+      if (m && !line.trim().startsWith('#')) {
+        const col = m[1].length + (m[2]?.length ?? 0);
+        while (frames.length && frames[frames.length - 1].col > col) frames.pop();
+        if (m[2]) {
+          // new list item → new mapping at this column
+          while (frames.length && frames[frames.length - 1].col >= col) frames.pop();
+          frames.push({ col, keys: new Set([m[3]]) });
+        } else {
+          let top = frames[frames.length - 1];
+          if (!top || top.col < col) { top = { col, keys: new Set() }; frames.push(top); }
+          if (top.keys.has(m[3])) {
+            out.push(`${m[1]}# aegis-fix: duplicate key removed: ${line.trim()}`);
+            modified = true;
+            skipBlock = true;
+            skipIndent = col;
+            continue;
+          }
+          top.keys.add(m[3]);
         }
-        seenKeys.add(m[1]);
+        if (/:\s*[|>][-+]?\s*$/.test(line)) inBlockScalar = col;
       }
       out.push(line);
     }
     if (modified)
-      fixes.push({ path: f.path, content: out.join('\n'), explanation: 'Removed duplicate top-level YAML keys — YAML parsers raise errors or silently drop duplicate keys; the second occurrence was commented out', confidence: 100 });
+      fixes.push({ path: f.path, content: out.join('\n'), explanation: 'Removed duplicate YAML keys — GitHub Actions and most YAML parsers reject a mapping that repeats a key; the first occurrence is kept and the duplicate is commented out', confidence: 100 });
   }
   return fixes;
 }
@@ -242,7 +284,11 @@ export function fixDuplicateYamlKey(files: Array<{ path: string; content: string
 export function fixChmodScript(logs: string, files: Array<{ path: string; content: string }>): RuleFix[] {
   if (!/permission denied/i.test(logs)) return [];
   // Extract ALL scripts mentioned — sometimes multiple scripts are denied
-  const scripts = [...logs.matchAll(/permission denied[^:]*?[:\s]+([\w/.\-]+\.sh)/gi)].map(m => m[1]);
+  const scripts = [
+    ...[...logs.matchAll(/permission denied[^:]*?[:\s]+([\w/.\-]+\.sh)/gi)].map(m => m[1]),
+    // the usual bash form puts the path first: "./scripts/deploy.sh: Permission denied"
+    ...[...logs.matchAll(/([\w/.\-]+\.sh):\s*Permission denied/gi)].map(m => m[1]),
+  ].map(s => s.replace(/^\.\//, ''));
   if (scripts.length === 0) return [];
   const fixes: RuleFix[] = [];
   for (const f of files) {
@@ -251,9 +297,10 @@ export function fixChmodScript(logs: string, files: Array<{ path: string; conten
     let changed = false;
     for (const script of scripts) {
       if (!content.includes(script)) continue;
+      // match the command as written in the workflow (with or without ./)
       const fixed = content.replace(
-        new RegExp(`(\\s+run:\\s*)(${script.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'g'),
-        `$1chmod +x ${script} && ${script}`,
+        new RegExp(`(\\s+run:\\s*)((?:\\./)?${script.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'g'),
+        (_, prefix, cmd) => `${prefix}chmod +x ${cmd} && ${cmd}`,
       );
       if (fixed !== content) { content = fixed; changed = true; }
     }

@@ -1,5 +1,8 @@
 import type { HealingEventRecord } from '../types';
 import type { ErrorDiagnosis } from './diagnostics';
+import { extractJson } from './jsonExtract';
+import { sanitizeForAI } from './sanitize';
+import { GROQ_MODEL } from './models';
 
 export interface Fix {
   path: string;
@@ -32,12 +35,16 @@ export async function analyzeAndFixWithGroq(
   let totalChars = 0;
   const filesText = files
     .map(f => {
-      const content = f.content.length > MAX_FILE ? f.content.slice(0, MAX_FILE) + '\n…[truncated]' : f.content;
+      const safe = sanitizeForAI(f.content); // repo content is untrusted prompt input
+      const content = safe.length > MAX_FILE ? safe.slice(0, MAX_FILE) + '\n…[truncated]' : safe;
       return `### ${f.path}\n\`\`\`\n${content}\n\`\`\``;
     })
     .filter(block => {
+      // Only count blocks that are actually kept — otherwise one oversized
+      // file poisons the budget and later small files get dropped for free.
+      if (totalChars + block.length > MAX_TOTAL) return false;
       totalChars += block.length;
-      return totalChars <= MAX_TOTAL;
+      return true;
     })
     .join('\n\n');
 
@@ -136,39 +143,24 @@ Always produce at least one fix for the failing workflow file(s). Never return e
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
+      model: GROQ_MODEL,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
       max_tokens: 8000,
     }),
-  });
+  }).catch(() => null); // network failure → let the caller fall back to Gemini
 
-  if (!res.ok) return null;
-  const data = await res.json();
+  if (!res?.ok) return null;
+  const data = await res.json().catch(() => null);
+  if (!data) return null;
   const text: string = data.choices?.[0]?.message?.content ?? '';
 
-  try {
-    // Strategy 1: try the whole text after stripping ```json fences
-    // Strategy 2: balanced-bracket extraction (safe against greedy regex misfires)
-    let rawJson: string | null = null;
-    const stripped = text.replace(/^```(?:json)?\s*/m, '').replace(/\s*```\s*$/m, '').trim();
-    try { JSON.parse(stripped); rawJson = stripped; } catch { /* fall through */ }
-    if (!rawJson) {
-      const start = text.indexOf('{');
-      if (start !== -1) {
-        let depth = 0, i = start;
-        for (; i < text.length; i++) {
-          if (text[i] === '{') depth++;
-          else if (text[i] === '}') { depth--; if (depth === 0) break; }
-        }
-        rawJson = text.slice(start, i + 1);
-      }
-    }
-    if (!rawJson) return null;
-    const parsed = JSON.parse(rawJson) as Partial<AnalysisResult> & {
+  {
+    const parsed = extractJson<Partial<AnalysisResult> & {
       primary_cause?: string;
       secondary_causes?: string[];
-    };
+    }>(text);
+    if (!parsed) return null;
 
     // Merge primary_cause + secondary_causes into the analysis field if AI used the extended schema
     let analysis = parsed.analysis ?? '';
@@ -183,8 +175,6 @@ Always produce at least one fix for the failing workflow file(s). Never return e
       fixes: parsed.fixes ?? [],
       ranked_alternatives: parsed.ranked_alternatives ?? [],
     };
-  } catch {
-    return null;
   }
 }
 
@@ -227,7 +217,7 @@ Be technical, concise, and actionable. Each section should be 2–4 sentences.`;
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
+      model: GROQ_MODEL,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.3,
     }),

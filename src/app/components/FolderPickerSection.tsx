@@ -58,7 +58,7 @@ export function FolderPickerSection({ selectedFiles, folderName, skippedCount, o
       <input
         ref={fileInputRef}
         type="file"
-        // @ts-ignore — webkitdirectory is not in React's types but works in all browsers
+        // @ts-expect-error — webkitdirectory is not in React's types but works in all browsers
         webkitdirectory=""
         multiple
         className="hidden"

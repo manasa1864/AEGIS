@@ -1,0 +1,48 @@
+# Aegis fix catalog #049 — Webpack compilation runs out of memory
+#
+# Tier:       3 · Intermediate
+# Category:   webpack_build_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | webpack compilation failed
+#   | FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory
+#   | <--- JS stacktrace ---> webpack 5.91.0
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added NODE_OPTIONS=--max-old-space-size=4096 + 4GB swap space — Node.js ran out of heap during build
+#     - defaulting to 4096MB
+#     - Upgraded to ubuntu-latest-4-cores runner — the job was OOM-killed on a 2-core runner
+#     - 4-core GitHub-hosted runners have 16 GB RAM (vs 7 GB for standard) and are available for most GitHub plan tiers
+#
+# Apply:      git apply 03-intermediate/049-webpack_build_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,9 +14,10 @@
+ env:
+   CI: 'true'
+   NODE_ENV: test
++  NODE_OPTIONS: --max-old-space-size=4096 --expose-gc
+ jobs:
+   build:
+-    runs-on: ubuntu-latest
++    runs-on: ubuntu-latest-4-cores
+     timeout-minutes: 15
+     steps:
+       - uses: actions/checkout@v4
+@@ -25,5 +26,13 @@
+           node-version: 20
+           cache: npm
+       - run: npm ci
++      - name: Create swap space for large builds
++        run: |
++          sudo fallocate -l 4G /swapfile
++          sudo chmod 600 /swapfile
++          sudo mkswap /swapfile
++          sudo swapon /swapfile
++          echo "Swap space enabled:"
++          free -h
+       - run: npm run build
+       - run: npm test

@@ -1,3 +1,5 @@
+import { b64DecodeUtf8 } from './base64';
+
 export interface RepoInfo {
   owner: string;
   repo: string;
@@ -100,7 +102,7 @@ export async function getWorkflowFiles(pat: string, owner: string, repo: string,
   try {
     return [{
       path: '.gitlab-ci.yml',
-      content: atob(d.content.replace(/\n/g, '')),
+      content: b64DecodeUtf8(d.content),
       sha: d.blob_id,
     }];
   } catch {
@@ -120,13 +122,15 @@ export async function fetchRepoFile(
     );
     if (!res.ok) return null;
     const d = await res.json();
-    return { path, content: atob(d.content.replace(/\n/g, '')), sha: d.blob_id };
+    return { path, content: b64DecodeUtf8(d.content), sha: d.blob_id };
   } catch {
     return null;
   }
 }
 
-// Fetch the last 60 lines of a job's trace log
+// Fetch the tail of a job's trace log. 300 lines matches the GitHub side —
+// GitLab errors often sit above after_script/cleanup output, which 60 lines
+// regularly cut off. chunkLogs() trims this further before it reaches the AI.
 export async function getJobLogs(
   pat: string, owner: string, repo: string, jobId: number,
 ): Promise<string> {
@@ -138,7 +142,7 @@ export async function getJobLogs(
     if (!res.ok) return '';
     const text = await res.text();
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-    return lines.slice(-60).join('\n');
+    return lines.slice(-300).join('\n');
   } catch {
     return '';
   }
@@ -212,7 +216,8 @@ export async function waitForBranchPipeline(
     const latest = pipelines[0] as { status: string };
     const status = latest.status;
 
-    if (status === 'running' || status === 'pending' || status === 'created') continue;
+    if (status === 'running' || status === 'pending' || status === 'created'
+      || status === 'waiting_for_resource' || status === 'preparing' || status === 'scheduled') continue;
     if (status === 'success') return 'success';
     if (status === 'failed' || status === 'canceled') return 'failure';
     // 'skipped' or unknown — treat as non-failure

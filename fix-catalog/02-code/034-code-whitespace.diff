@@ -1,0 +1,26 @@
+# Aegis fix catalog #034 — Trailing whitespace / missing final newline
+#
+# Tier:       2 · Source code
+# Category:   lint_failure
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | app/models.py:3:30: W291 trailing whitespace
+#   | app/models.py:6:1: W391 blank line at end of file
+#
+# How it is solved:
+#   MODIFY app/models.py
+#     - Normalized whitespace flagged by the linter (trailing spaces removed, exactly one newline at end of file) — pure formatting, no code change
+#
+# Apply:      git apply 02-code/034-code-whitespace.diff
+diff --git a/app/models.py b/app/models.py
+--- a/app/models.py
++++ b/app/models.py
+@@ -1,6 +1,3 @@
+ class User:
+     def __init__(self, name):
+-        self.name = name          
+-
+-
+-
++        self.name = name

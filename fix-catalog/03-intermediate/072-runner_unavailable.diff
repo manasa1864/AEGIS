@@ -1,0 +1,28 @@
+# Aegis fix catalog #072 — Runner label typo
+#
+# Tier:       3 · Intermediate
+# Category:   runner_unavailable (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | No hosted runner found matching label: ubuntu-lastest
+#   | Waiting for a runner to pick up this job...
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Fixed runner label typos/EOL labels — misspelled or deprecated runner labels cause "no runner available" errors
+#     - updated to current GitHub-hosted runner names
+#
+# Apply:      git apply 03-intermediate/072-runner_unavailable.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -16,7 +16,7 @@
+   NODE_ENV: test
+ jobs:
+   build:
+-    runs-on: ubuntu-lastest
++    runs-on: ubuntu-latest
+     timeout-minutes: 15
+     steps:
+       - uses: actions/checkout@v4

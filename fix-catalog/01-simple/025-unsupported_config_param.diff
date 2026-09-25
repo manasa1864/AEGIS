@@ -1,0 +1,30 @@
+# Aegis fix catalog #025 — Removed compiler option in tsconfig
+#
+# Tier:       1 · Simple
+# Category:   unsupported_config_param (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | error TS5023: Unknown compiler option 'suppressImplicitAnyIndexErrors'.
+#   | unknown option in config — unsupported configuration key
+#
+# How it is solved:
+#   MODIFY tsconfig.json
+#     - Removed deprecated tsconfig options [suppressImplicitAnyIndexErrors, keyofStringsOnly, noStrictGenericChecks, charset, out, suppressExcessPropertyErrors, importsNotUsedAsValues, noImplicitUseStrict, reactNamespace] — these options were removed in TypeScript 5.x and cause TS5023 errors
+#     - Set TypeScript interop options — skipLibCheck skips type errors inside third-party .d.ts files and esModuleInterop/allowSyntheticDefaultImports fix default-import errors
+#     - strict mode is left untouched so real type errors in your code still fail the build
+#
+# Apply:      git apply 01-simple/025-unsupported_config_param.diff
+diff --git a/tsconfig.json b/tsconfig.json
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -2,6 +2,8 @@
+   "compilerOptions": {
+     "target": "ES2022",
+     "strict": true,
+-    "suppressImplicitAnyIndexErrors": true
++    "skipLibCheck": true,
++    "esModuleInterop": true,
++    "allowSyntheticDefaultImports": true
+   }
+ }

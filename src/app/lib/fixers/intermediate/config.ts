@@ -7,7 +7,7 @@ import { RuleFix, isGitHubWorkflow, isGitLabCI, isYAML, injectWorkflowLevelBlock
 
 /** Upgrade deprecated GitHub Actions versions to Node.js 24-compatible releases. */
 export function fixActionsVersionUpgrade(logs: string, files: Array<{ path: string; content: string }>): RuleFix[] {
-  if (!/Node\.js 20.*deprecated|actions.*running on Node\.js 20|FORCE_JAVASCRIPT_ACTIONS_TO_NODE24|will be forced to run with Node\.js 24/i.test(logs)) return [];
+  if (!/Node\.js\s*(?:12|16|20).*deprecat|deprecated version of|actions?\b.*deprecat|deprecat.*\bactions?\b|set-output.*deprecated|save-state.*deprecated|FORCE_JAVASCRIPT_ACTIONS_TO_NODE24|will be forced to run with Node\.js 24/i.test(logs)) return [];
   const UPGRADES: Record<string, string> = {
     'actions/checkout@v3': 'actions/checkout@v4',
     'actions/checkout@v2': 'actions/checkout@v4',
@@ -98,7 +98,7 @@ export function fixJobTimeout(logs: string, files: Array<{ path: string; content
 
 /** Create a minimal .eslintrc.json when lint fails and no config exists. */
 export function fixMissingEslintConfig(logs: string, files: Array<{ path: string; content: string }>): RuleFix[] {
-  if (!/eslint.*no.*config|eslint.*not.*find.*config|No ESLint configuration/i.test(logs)) return [];
+  if (!/eslint.*no.*config|eslint.*(?:not|couldn't|could not).*find.*config|No ESLint configuration/i.test(logs)) return [];
   if (files.some(f => ['.eslintrc','.eslintrc.json','.eslintrc.js','.eslintrc.yaml','eslint.config.js','eslint.config.mjs'].some(n => f.path.endsWith(n)))) return [];
   const isTS = files.some(f => f.path === 'tsconfig.json');
   const isReact = files.some(f => f.path === 'package.json' && f.content.includes('"react"'));
@@ -401,7 +401,7 @@ export function fixGitLabRulesNeverMatch(files: Array<{ path: string; content: s
     // Detect rules: blocks that only have when: never (job will never run)
     const fixed = f.content.replace(
       /^(  rules:\s*\n(?:\s+-\s+when:\s+never\s*\n)+)/gm,
-      (_, block) => `  rules:\n    - when: on_success\n  # aegis: replaced always-never rules block — previous rules caused job to never execute\n`,
+      () => `  rules:\n    - when: on_success\n  # aegis: replaced always-never rules block — previous rules caused job to never execute\n`,
     );
     // Detect rules: blocks missing a when: fallback
     const withFallback = fixed.replace(
@@ -872,7 +872,7 @@ export function fixGitLabBeforeScriptLevel(logs: string, files: Array<{ path: st
     // before_script inside a job should be indented 2 spaces; script must be a list
     const fixed = f.content.replace(
       /^(\w[\w-]+:\s*\n)((?:\s+[^\n]+\n)*)(    before_script:)/gm,
-      (_, header, rest, bs) => `${header}${rest}  before_script:`,
+      (_, header, rest) => `${header}${rest}  before_script:`,
     );
     if (fixed !== f.content)
       fixes.push({ path: f.path, content: fixed, explanation: 'Fixed before_script indentation — job-level before_script must be at 2-space indent under the job name; at 4-space it becomes part of a nested block and is not recognized as the before_script key', confidence: 88 });
@@ -914,14 +914,13 @@ export function fixStepUsesAndRunConflict(files: Array<{ path: string; content: 
     let inStep = false;
     let stepHasUses = false;
     let stepHasRun = false;
-    let stepStartIdx = 0;
     for (let i = 0; i < lines.length; i++) {
       if (/^\s+- (name:|uses:|run:)/.test(lines[i])) {
         if (inStep && stepHasUses && stepHasRun) {
           // Split: remove run: from step with uses: and add a new step
           modified = true;
         }
-        inStep = true; stepHasUses = false; stepHasRun = false; stepStartIdx = i;
+        inStep = true; stepHasUses = false; stepHasRun = false;
       }
       if (inStep && /^\s+uses:/.test(lines[i])) stepHasUses = true;
       if (inStep && /^\s+run:/.test(lines[i])) stepHasRun = true;
@@ -1065,12 +1064,11 @@ export function fixDuplicateJobId(logs: string, files: Array<{ path: string; con
     const seen = new Set<string>();
     const out: string[] = [];
     let skip = false;
-    let skipDepth = 0;
     for (let i = 0; i < lines.length; i++) {
       const m = lines[i].match(/^  ([\w-]+):\s*$/);
       if (m) {
         if (seen.has(m[1])) {
-          skip = true; skipDepth = 2;
+          skip = true;
           out.push(`  # aegis: duplicate job "${m[1]}" removed`);
           continue;
         }
@@ -1229,7 +1227,7 @@ export function fixGitLabVariableScope(files: Array<{ path: string; content: str
     // Find global variables
     const globalVarsMatch = f.content.match(/^variables:\s*\n((?:\s+\w+:[^\n]+\n)+)/m);
     if (!globalVarsMatch) continue;
-    const globalVars = [...globalVarsMatch[1].matchAll(/^\s+(\w+):/gm)].map(m => m[1]);
+    const globalVars = new Set([...globalVarsMatch[1].matchAll(/^\s+(\w+):/gm)].map(m => m[1]));
     // Find job-level variables that shadow global ones with the same value
     const fixed = f.content.replace(
       /^(  [\w-]+:\s*\n(?:\s+[^\n]+\n)*?\s+variables:\s*\n)((?:\s{4,}\w+:[^\n]+\n)+)/gm,
@@ -1238,8 +1236,10 @@ export function fixGitLabVariableScope(files: Array<{ path: string; content: str
         const nonShadowing = jobVarLines.filter(l => {
           const key = l.trim().split(':')[0];
           // Keep if the value differs from global
-          const globalMatch = globalVarsMatch[1].match(new RegExp(`${key}:\\s*([^\n]+)`));
-          if (!globalMatch) return true; // not in global, keep
+          if (!globalVars.has(key)) return true; // not in global, keep
+          // Anchored to the whole key — unanchored, "NODE" also matched "MY_NODE:"
+          const globalMatch = globalVarsMatch[1].match(new RegExp(`^\\s+${key}:\\s*([^\n]+)`, 'm'));
+          if (!globalMatch) return true;
           const jobVal = l.split(':').slice(1).join(':').trim();
           const globalVal = globalMatch[1].trim();
           return jobVal !== globalVal; // remove if same as global
@@ -1267,29 +1267,37 @@ export function fixSecretToEnvMapping(files: Array<{ path: string; content: stri
     let modified = false;
     for (let i = 0; i < lines.length; i++) {
       out.push(lines[i]);
-      if (/^\s+run:/.test(lines[i])) {
-        // Look ahead for env usage in the script block
-        const scriptLines: string[] = [];
+      const runLine = lines[i].match(/^(\s+)(- +)?run:/);
+      if (runLine) {
+        // Look ahead for env usage in the script block (single-line or `run: |`)
+        const scriptLines: string[] = [lines[i].replace(/^.*?run:/, '')];
         let j = i + 1;
         while (j < lines.length && /^\s{8,}/.test(lines[j])) {
           scriptLines.push(lines[j]);
           j++;
         }
-        const secretRefs = [...scriptLines.join('\n').matchAll(/\$([A-Z_]{4,})/g)]
-          .map(m => m[1])
-          .filter(v => !['GITHUB_TOKEN', 'GITHUB_SHA', 'GITHUB_REF', 'CI', 'PATH', 'HOME'].includes(v));
-        if (secretRefs.length > 0) {
-          // Check if env: already covers these
-          const prevContent = lines.slice(Math.max(0, i - 10), i).join('\n');
-          const uncovered = secretRefs.filter(ref => !prevContent.includes(ref + ':'));
-          if (uncovered.length > 0 && !lines[i - 1]?.includes('env:')) {
-            const indent = lines[i].match(/^(\s+)/)?.[1] ?? '      ';
-            out.splice(out.length - 1, 0,
-              `${indent}env:`,
-              ...uncovered.map(ref => `${indent}  ${ref}: \${{ secrets.${ref} }}`),
+        // Runner-provided variables and shell builtins are never secrets.
+        const BUILTIN = /^(?:GITHUB_|RUNNER_|ACTIONS_|INPUT_|CI$|PATH$|HOME$|PWD$|USER$|SHELL$|TMPDIR$|LANG$)/;
+        const secretRefs = [...new Set([...scriptLines.join('\n').matchAll(/\$\{?([A-Z][A-Z0-9_]{3,})\}?/g)].map(m => m[1]))]
+          .filter(v => !BUILTIN.test(v))
+          // already provided anywhere in the workflow (workflow/job/step env:)
+          .filter(v => !new RegExp(`^\\s+${v}:`, 'm').test(f.content));
+        if (secretRefs.length > 0 && !lines[i - 1]?.includes('env:')) {
+          const col = runLine[1];
+          if (runLine[2]) {
+            // `- run: ...` → the env: has to live inside the same step
+            out.splice(out.length - 1, 1,
+              `${col}- env:`,
+              ...secretRefs.map(ref => `${col}    ${ref}: \${{ secrets.${ref} }}`),
+              `${col}  ${lines[i].trimStart().replace(/^- +/, '')}`,
             );
-            modified = true;
+          } else {
+            out.splice(out.length - 1, 0,
+              `${col}env:`,
+              ...secretRefs.map(ref => `${col}  ${ref}: \${{ secrets.${ref} }}`),
+            );
           }
+          modified = true;
         }
       }
     }
@@ -1328,7 +1336,6 @@ export function fixJobOutputDeclaration(files: Array<{ path: string; content: st
     // Find needs.jobName.outputs.key references
     const neededOutputs = [...f.content.matchAll(/needs\.([\w-]+)\.outputs\.([\w-]+)/g)];
     if (neededOutputs.length === 0) continue;
-    const lines = f.content.split('\n');
     let modified = false;
     let content = f.content;
     for (const [, jobName, outputKey] of neededOutputs) {

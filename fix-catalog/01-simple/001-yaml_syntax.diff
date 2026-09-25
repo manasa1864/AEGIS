@@ -1,0 +1,27 @@
+# Aegis fix catalog #001 — Tab characters in a workflow file
+#
+# Tier:       1 · Simple
+# Category:   yaml_syntax (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Invalid workflow file: .github/workflows/ci.yml#L16
+#   | You have an error in your yaml syntax on line 16: found character '\t' that cannot start any token
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Replaced tab indentation with 2-space — YAML requires spaces, tabs cause parse errors in all YAML parsers
+#
+# Apply:      git apply 01-simple/001-yaml_syntax.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -16,7 +16,7 @@
+   NODE_ENV: test
+ jobs:
+   build:
+-	runs-on: ubuntu-latest
++    runs-on: ubuntu-latest
+     timeout-minutes: 15
+     steps:
+       - uses: actions/checkout@v4

@@ -122,7 +122,7 @@ def get_event(event_id: int):
     """
     user_id = int(get_jwt_identity())
     event = db.session.get(HealingEvent, event_id)
-    if not event or (event.user_id is not None and event.user_id != user_id):
+    if not event or event.user_id != user_id:
         return jsonify({'error': 'Event not found'}), 404
     return jsonify(event.to_dict())
 
@@ -142,7 +142,7 @@ def update_event(event_id: int):
     """
     user_id = int(get_jwt_identity())
     event = db.session.get(HealingEvent, event_id)
-    if not event or (event.user_id is not None and event.user_id != user_id):
+    if not event or event.user_id != user_id:
         return jsonify({'error': 'Event not found'}), 404
 
     data = request.get_json() or {}

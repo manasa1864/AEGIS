@@ -444,9 +444,9 @@ export function fixCompilationFailure(logs: string, files: Array<{ path: string;
       if (!opts['skipLibCheck'])                { opts['skipLibCheck'] = true; changed = true; }
       if (!opts['esModuleInterop'])             { opts['esModuleInterop'] = true; changed = true; }
       if (!opts['allowSyntheticDefaultImports']) { opts['allowSyntheticDefaultImports'] = true; changed = true; }
-      if (opts['strict'] === true)              { opts['strict'] = false; opts['strictNullChecks'] = false; changed = true; }
+      // strict is never switched off — that hides real type errors instead of fixing them
       if (changed)
-        fixes.push({ path: f.path, content: JSON.stringify({ ...obj, compilerOptions: opts }, null, 2) + '\n', explanation: 'Loosened TypeScript compiler options — skipLibCheck, esModuleInterop, strict:false to unblock compilation while preserving runtime safety', confidence: 100 });
+        fixes.push({ path: f.path, content: JSON.stringify({ ...obj, compilerOptions: opts }, null, 2) + '\n', explanation: 'Set TypeScript interop options — skipLibCheck skips type errors inside third-party .d.ts files and esModuleInterop/allowSyntheticDefaultImports fix default-import errors; strict mode is left untouched so real type errors in your code still fail the build', confidence: 100 });
     } catch { /* invalid JSON */ }
   }
   for (const f of files) {

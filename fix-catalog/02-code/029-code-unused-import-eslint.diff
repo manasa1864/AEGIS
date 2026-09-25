@@ -1,0 +1,31 @@
+# Aegis fix catalog #029 — ESLint no-unused-vars on an import
+#
+# Tier:       2 · Source code
+# Category:   lint_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | /home/runner/work/app/app/src/routes/users.ts
+#   |   1:10  error  'Router' is defined but never used  @typescript-eslint/no-unused-vars
+#   |   2:15  error  'z' is defined but never used  @typescript-eslint/no-unused-vars
+#   | 
+#   | ✖ 2 problems (2 errors, 0 warnings)
+#
+# How it is solved:
+#   MODIFY src/routes/users.ts
+#     - Removed unused imports reported by the compiler/linter (removed unused import 'Router'
+#     - removed unused import 'z') — noUnusedLocals / no-unused-vars fail the build
+#     - only import bindings were touched, never statements with side effects
+#
+# Apply:      git apply 02-code/029-code-unused-import-eslint.diff
+diff --git a/src/routes/users.ts b/src/routes/users.ts
+--- a/src/routes/users.ts
++++ b/src/routes/users.ts
+@@ -1,5 +1,5 @@
+-import { Router, type Request } from 'express';
+-import { json, z } from './schema';
++import { type Request } from 'express';
++import { json } from './schema';
+ 
+ export function listUsers(req: Request) {
+   return json(req.query);

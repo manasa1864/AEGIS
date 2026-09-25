@@ -1,0 +1,25 @@
+# Aegis fix catalog #003 — A step with both `uses:` and `run:`
+#
+# Tier:       1 · Simple
+# Category:   invalid_workflow_syntax (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Invalid workflow file: .github/workflows/ci.yml
+#   | The workflow file is invalid. a step cannot have both the `uses` and `run` keys
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Split a step that had both uses: and run: into two steps — a single step may call an action OR run a shell command, never both
+#     - the command now runs as its own step right after the action
+#
+# Apply:      git apply 01-simple/003-invalid_workflow_syntax.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -21,4 +21,4 @@
+     steps:
+       - uses: actions/checkout@v4
+       - uses: actions/setup-node@v4
+-        run: npm ci
++      - run: npm ci

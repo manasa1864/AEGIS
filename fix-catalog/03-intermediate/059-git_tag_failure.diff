@@ -1,0 +1,29 @@
+# Aegis fix catalog #059 — Shallow clone has no tags for `git describe`
+#
+# Tier:       3 · Intermediate
+# Category:   git_tag_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | fatal: No tags can describe '5f3c2a1e9d8b'.
+#   | Try --always, or create some tags.
+#   | semantic-release: git describe failed
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added fetch-depth: 0 to actions/checkout — shallow clone (default depth=1) omits git tags and full history
+#     - semantic versioning, git describe, and changelog tools require full history
+#
+# Apply:      git apply 03-intermediate/059-git_tag_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -20,6 +20,8 @@
+     timeout-minutes: 15
+     steps:
+       - uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
+       - uses: actions/setup-node@v4
+         with:
+           node-version: 20

@@ -1,0 +1,25 @@
+# Aegis fix catalog #016 — Script is not executable
+#
+# Tier:       1 · Simple
+# Category:   permission_denied (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | /home/runner/work/_temp/9a.sh: line 1: ./scripts/deploy.sh: Permission denied
+#   | Error: Process completed with exit code 126.
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added chmod +x for permission-denied scripts — Git does not preserve execute bits on Windows checkouts
+#     - scripts need +x before they can run
+#
+# Apply:      git apply 01-simple/016-permission_denied.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -25,4 +25,4 @@
+           node-version: 20
+           cache: npm
+       - run: npm ci
+-      - run: ./scripts/deploy.sh
++      - run: chmod +x ./scripts/deploy.sh && ./scripts/deploy.sh

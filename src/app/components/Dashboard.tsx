@@ -12,7 +12,7 @@ import { HistoryView } from './HistoryView';
 import { IntelligenceView } from './IntelligenceView';
 import { useHealingProcess } from '../hooks/useHealingProcess';
 import { Project, View, MetricsData } from '../types';
-import { getRepo, getComprehensiveCI } from '../lib/github';
+import { getRepo, getComprehensiveCI, isFailedConclusion } from '../lib/github';
 import { getRepo as getGitlabRepo, getLatestFailedPipeline } from '../lib/gitlab';
 import { apiGetRepos, apiAddRepo, apiUpdateRepo, apiDeleteRepo, apiGetMetrics, apiCreateEvent, apiGetEvents, apiUpdateEvent } from '../lib/backendApi';
 import { levelToErrorType, type ErrorLevel } from '../lib/errorLevel';
@@ -146,12 +146,26 @@ function ApprovalModal({ approval, onApprove, onCancel }: {
   );
 }
 
+// Keys from .env are a local-dev convenience only. Vite inlines every VITE_*
+// value into the JS bundle, so reading them in a production build would ship
+// the PATs/API keys to every visitor. `import.meta.env.DEV` is statically false
+// in `vite build`, letting the minifier drop the secret strings entirely.
+const DEV_KEYS = import.meta.env.DEV
+  ? {
+      github: import.meta.env.VITE_GITHUB_PAT ?? '',
+      gitlab: import.meta.env.VITE_GITLAB_PAT ?? '',
+      gemini: import.meta.env.VITE_GEMINI_KEY ?? '',
+      groq: import.meta.env.VITE_GROQ_KEY ?? '',
+      gcloud: import.meta.env.VITE_GCLOUD_KEY ?? '',
+    }
+  : { github: '', gitlab: '', gemini: '', groq: '', gcloud: '' };
+
 export function Dashboard({ onLogout }: DashboardProps) {
-  const [githubPat, setGithubPat] = useState(() => import.meta.env.VITE_GITHUB_PAT || sessionStorage.getItem('aegis_pat') || '');
-  const [gitlabPat, setGitlabPat] = useState(() => import.meta.env.VITE_GITLAB_PAT || sessionStorage.getItem('aegis_gitlab_pat') || '');
-  const [geminiKey, setGeminiKey] = useState(() => import.meta.env.VITE_GEMINI_KEY || sessionStorage.getItem('aegis_gemini') || '');
-  const [groqKey, setGroqKey] = useState(() => import.meta.env.VITE_GROQ_KEY || sessionStorage.getItem('aegis_groq') || '');
-  const [gcloudKey] = useState(() => import.meta.env.VITE_GCLOUD_KEY || '');
+  const [githubPat, setGithubPat] = useState(() => DEV_KEYS.github || sessionStorage.getItem('aegis_pat') || '');
+  const [gitlabPat, setGitlabPat] = useState(() => DEV_KEYS.gitlab || sessionStorage.getItem('aegis_gitlab_pat') || '');
+  const [geminiKey, setGeminiKey] = useState(() => DEV_KEYS.gemini || sessionStorage.getItem('aegis_gemini') || '');
+  const [groqKey, setGroqKey] = useState(() => DEV_KEYS.groq || sessionStorage.getItem('aegis_groq') || '');
+  const [gcloudKey] = useState(() => DEV_KEYS.gcloud);
 
   const [view, setView] = useState<View>(() => (sessionStorage.getItem('aegis_view') as View) || 'healing');
   // loadMetrics is declared below — safe to reference here because handleViewChange
@@ -199,7 +213,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
         errorType = failed ? `FAILING: pipeline#${failed.id}` : 'CI_HEALTHY';
       } else if (project.platform !== 'gitlab' && githubPat) {
         const checks = await getComprehensiveCI(githubPat, project.owner, project.repoName, project.repo || 'main').catch(() => []);
-        const failing = checks.filter(c => c.conclusion === 'failure');
+        const failing = checks.filter(c => isFailedConclusion(c.conclusion));
         healingStatus = failing.length > 0 ? 'HIGH' : 'NO_ERROR';
         errorType = failing.length > 0
           ? `FAILING: ${failing.slice(0, 2).map(c => c.name).join(', ')}`
@@ -235,7 +249,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
           delete ciEventRef.current[project.id];
         } else {
           // Cross-session: find the latest open healing event for this project
-          const events = await apiGetEvents(project.repoName)
+          // Backend matches project_name exactly, and events store "owner/repo"
+          const events = await apiGetEvents(projectName)
             .catch(() => []) as Array<{ id: number; status: string; project_name: string }>;
           const open = events.find(e => e.status === 'healing' && e.project_name === projectName);
           if (open) apiUpdateEvent(open.id, { status: 'healed' }).catch(() => {});
@@ -257,7 +272,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
       }
 
     } catch { /* non-fatal — card stays at current state */ }
-  }, [githubPat, gitlabPat, loadMetrics]);
+  }, [githubPat, gitlabPat, loadMetrics, bumpHistory]);
 
   useEffect(() => {
     apiGetRepos()
@@ -344,7 +359,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   const {
     systemStatus, activeNode, streamEntries, logs, showLogs, setShowLogs,
-    healRepo, resetHealing, pendingApproval, approveHealing, cancelHealing,
+    healRepo, resetHealing, pendingApproval, approveHealing, cancelHealing, run,
   } = useHealingProcess({
     projects, selectedProject, githubPat, gitlabPat, geminiKey, groqKey, gcloudKey,
     safeMode,
@@ -370,7 +385,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
     if (inHealingTab) setAddingRepo(true);
     try {
       const parsed = detectPlatform(url);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       let saved: any;
       if (parsed) {
         const { platform, owner, repo } = parsed;
@@ -498,6 +513,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   project={selectedProjectData}
                   systemStatus={systemStatus}
                   activeNode={activeNode}
+                  run={run}
                   effectivePat={effectivePat}
                   safeMode={safeMode}
                   onToggleSafeMode={() => setSafeMode(v => !v)}

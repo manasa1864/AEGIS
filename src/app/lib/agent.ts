@@ -1,3 +1,4 @@
+import { geminiGenerateUrl } from './models';
 export interface HealingPlan {
   rootCause: string;
   severity: 'low' | 'medium' | 'high' | 'critical';
@@ -38,7 +39,7 @@ Rules:
 - estimatedTime: realistic estimate to apply and verify the fix`;
 
   try {
-    const res = await fetch('/api/gemini/v1beta/models/gemini-2.0-flash:generateContent', {
+    const res = await fetch(geminiGenerateUrl(), {
       method: 'POST',
       headers: { 'x-goog-api-key': geminiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),

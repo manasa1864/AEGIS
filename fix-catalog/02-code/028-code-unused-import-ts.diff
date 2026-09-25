@@ -1,0 +1,28 @@
+# Aegis fix catalog #028 — TypeScript unused import (TS6133)
+#
+# Tier:       2 · Source code
+# Category:   compilation_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | src/server.ts(2,10): error TS6133: 'readFile' is declared but its value is never read.
+#   | src/server.ts(3,1): error TS6192: All imports in import declaration are unused.
+#
+# How it is solved:
+#   MODIFY src/server.ts
+#     - Removed unused imports reported by the compiler/linter (removed unused import 'readFile'
+#     - removed an import whose bindings are all unused (TS6192)) — noUnusedLocals / no-unused-vars fail the build
+#     - only import bindings were touched, never statements with side effects
+#
+# Apply:      git apply 02-code/028-code-unused-import-ts.diff
+diff --git a/src/server.ts b/src/server.ts
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -1,6 +1,5 @@
+ import express from 'express';
+-import { readFile, writeFile } from 'node:fs/promises';
+-import { join } from 'node:path';
++import { writeFile } from 'node:fs/promises';
+ 
+ const app = express();
+ await writeFile('boot.log', 'started');

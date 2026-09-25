@@ -1,0 +1,45 @@
+# Aegis fix catalog #094 — Port already allocated on the runner
+#
+# Tier:       4 · Advanced
+# Category:   port_conflict (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error response from daemon: driver failed programming external connectivity: Bind for 0.0.0.0:5432 failed: port is already allocated
+#   | Error: listen EADDRINUSE: address already in use :::3000
+#
+# How it is solved:
+#   MODIFY docker-compose.yml
+#     - Removed version: field from Docker Compose — the version: top-level field is obsolete in Compose v2 (docker compose CLI)
+#     - its presence generates a deprecation warning and in some versions causes validation errors
+#     - Remapped host port 3000 → 3001 — port was already bound by another process
+#     - Added logging limits (10MB x 3 files) to docker-compose — without log rotation, container logs grow unboundedly and can fill the host disk, causing all containers on the host to fail
+#     - Added init: true to docker-compose service — equivalent to docker run --init
+#     - runs tini as PID 1, ensuring SIGTERM is forwarded to the app and zombie processes are reaped
+#     - prevents 10-second shutdown delays
+#
+# Apply:      git apply 04-advanced/094-port_conflict.diff
+diff --git a/docker-compose.yml b/docker-compose.yml
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -1,13 +1,18 @@
+-version: "3.8"
+ services:
+   app:
+     build: .
+     ports:
+-      - "3000:3000"
++      - "3001:3000"  # aegis: port 3000 was in use, remapped
+     depends_on:
+       - db
+   db:
+     image: postgres:16
++    init: true  # Run tini as PID 1 for proper signal forwarding and zombie reaping
++    logging:
++      driver: json-file
++      options:
++        max-size: "10m"
++        max-file: "3"
+     environment:
+       POSTGRES_PASSWORD: postgres
+     ports:

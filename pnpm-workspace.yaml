@@ -1,7 +1,11 @@
 packages:
   - '.'
+
 allowBuilds:
-  '@google/genai': set this to true or false
   '@tailwindcss/oxide': true
   esbuild: true
-  protobufjs: set this to true or false
+
+# Native deps that legitimately need postinstall build scripts under pnpm 9+
+onlyBuiltDependencies:
+  - '@tailwindcss/oxide'
+  - esbuild

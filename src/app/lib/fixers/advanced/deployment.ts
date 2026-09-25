@@ -5,7 +5,7 @@
 // analysis, service startup/readiness probes, PDB, HPA, LB health checks,
 // connection draining, Traefik, NGINX timeouts, circuit breaker patterns.
 
-import { RuleFix, isGitHubWorkflow, isGitLabCI, patchGitHubJobBlocks, insertStepBefore } from '../helpers';
+import { RuleFix, isGitHubWorkflow, isGitLabCI, patchGitHubJobBlocks, insertStepBefore, insertBesideKey } from '../helpers';
 
 /** Detect deployment tool and add actual rollback commands on failure. */
 export function fixDeployRollbackOnFailure(files: Array<{ path: string; content: string }>): RuleFix[] {
@@ -908,11 +908,12 @@ export function fixDockerImageHealthProbe(files: Array<{ path: string; content: 
     if (f.content.includes('livenessProbe') || f.content.includes('readinessProbe')) continue;
     const portMatch = f.content.match(/containerPort:\s*(\d+)/);
     const port = portMatch?.[1] ?? '8080';
-    const fixed = f.content.replace(
-      /(        image:.*\n)/,
-      `$1        readinessProbe:\n          httpGet:\n            path: /health\n            port: ${port}\n          initialDelaySeconds: 10\n          periodSeconds: 5\n          failureThreshold: 3\n        livenessProbe:\n          httpGet:\n            path: /health\n            port: ${port}\n          initialDelaySeconds: 30\n          periodSeconds: 10\n          failureThreshold: 3\n`,
+    const fixed = insertBesideKey(
+      f.content, 'image',
+      `        readinessProbe:\n          httpGet:\n            path: /health\n            port: ${port}\n          initialDelaySeconds: 10\n          periodSeconds: 5\n          failureThreshold: 3\n        livenessProbe:\n          httpGet:\n            path: /health\n            port: ${port}\n          initialDelaySeconds: 30\n          periodSeconds: 10\n          failureThreshold: 3\n`,
+      8,
     );
-    if (fixed !== f.content)
+    if (fixed && fixed !== f.content)
       fixes.push({ path: f.path, content: fixed, explanation: `Added readinessProbe + livenessProbe on port ${port}/health — readiness prevents traffic before container is ready; liveness restarts containers that become unresponsive`, confidence: 90 });
   }
   return fixes;
@@ -955,7 +956,7 @@ export function fixDeployTaggedRelease(files: Array<{ path: string; content: str
   for (const f of files) {
     if (!isGitHubWorkflow(f.path)) continue;
     if (!f.content.includes('deploy') || !f.content.includes('production')) continue;
-    if (f.content.includes("startsWith(github.ref, 'refs/tags/v')") || f.content.includes('RELEASE_TAG')) continue;
+    if (f.content.includes("startsWith(github.ref, 'refs/tags/v')") || f.content.includes('RELEASE_TAG') || f.content.includes('Verify release tag')) continue;
     const fixed = f.content.replace(
       /(\s+)(- uses: actions\/checkout@)/,
       `$1- name: Verify release tag\n$1  run: |\n$1    echo "Deploying tag: $\${GITHUB_REF_NAME}"\n$1    echo "$\${GITHUB_REF_NAME}" | grep -E '^v[0-9]+\\.[0-9]+\\.[0-9]+' || (echo "ERROR: Production deploy requires a SemVer tag (e.g. v1.2.3). Got: $\${GITHUB_REF_NAME}" && exit 1)\n$1$2`,
@@ -1415,11 +1416,13 @@ export function fixServiceStartupProbe(logs: string, files: Array<{ path: string
     if (f.content.includes('startupProbe')) continue;
     const portMatch = f.content.match(/containerPort:\s*(\d+)/);
     const port = portMatch?.[1] ?? '8080';
-    const fixed = f.content.replace(
-      /(        readinessProbe:)/,
-      `        startupProbe:\n          httpGet:\n            path: /health\n            port: ${port}\n          failureThreshold: 30\n          periodSeconds: 10\n        $1`,
+    // beside the container's readinessProbe, at the container-key indentation
+    const fixed = insertBesideKey(
+      f.content, 'readinessProbe',
+      `        startupProbe:\n          httpGet:\n            path: /health\n            port: ${port}\n          failureThreshold: 30\n          periodSeconds: 10\n`,
+      8, 'before',
     );
-    if (fixed !== f.content)
+    if (fixed && fixed !== f.content)
       fixes.push({ path: f.path, content: fixed, explanation: `Added startupProbe (30 × 10s = 300s window) — prevents liveness probe from killing slow-starting containers (JVM, Python with DB migrations) before they are fully initialized`, confidence: 90 });
   }
   return fixes;
@@ -1464,14 +1467,13 @@ export function fixServiceGracefulShutdown(logs: string, files: Array<{ path: st
     if (!f.path.endsWith('.yaml') && !f.path.endsWith('.yml')) continue;
     if (!f.content.includes('kind: Deployment')) continue;
     if (f.content.includes('terminationGracePeriodSeconds') || f.content.includes('preStop')) continue;
-    const fixed = f.content.replace(
-      /(      containers:)/,
-      `      terminationGracePeriodSeconds: 60\n      $1`,
-    ).replace(
-      /(        image:.*\n)/,
-      `$1        lifecycle:\n          preStop:\n            exec:\n              command: ["/bin/sh", "-c", "sleep 5"]\n`,
+    const withGrace = insertBesideKey(f.content, 'containers', '      terminationGracePeriodSeconds: 60\n', 6, 'before');
+    const fixed = withGrace && insertBesideKey(
+      withGrace, 'image',
+      '        lifecycle:\n          preStop:\n            exec:\n              command: ["/bin/sh", "-c", "sleep 5"]\n',
+      8,
     );
-    if (fixed !== f.content)
+    if (fixed && fixed !== f.content)
       fixes.push({ path: f.path, content: fixed, explanation: 'Added terminationGracePeriodSeconds: 60 + preStop sleep 5s — gives in-flight requests 5 seconds to complete before SIGTERM propagates; K8s routes no new requests during this window', confidence: 90 });
   }
   return fixes;
@@ -1487,11 +1489,14 @@ export function fixServiceTopologySpread(files: Array<{ path: string; content: s
     const labelMatch = f.content.match(/matchLabels:\s*\n\s+([\w]+):\s*([\w-]+)/);
     const labelKey = labelMatch?.[1] ?? 'app';
     const labelVal = labelMatch?.[2] ?? 'app';
-    const fixed = f.content.replace(
-      /(      containers:)/,
-      `      topologySpreadConstraints:\n        - maxSkew: 1\n          topologyKey: topology.kubernetes.io/zone\n          whenUnsatisfiable: DoNotSchedule\n          labelSelector:\n            matchLabels:\n              ${labelKey}: ${labelVal}\n      $1`,
+    // pod-spec key: sibling of containers: (the old "      $1" doubled its indentation
+    // and silently moved the container list inside topologySpreadConstraints)
+    const fixed = insertBesideKey(
+      f.content, 'containers',
+      `      topologySpreadConstraints:\n        - maxSkew: 1\n          topologyKey: topology.kubernetes.io/zone\n          whenUnsatisfiable: DoNotSchedule\n          labelSelector:\n            matchLabels:\n              ${labelKey}: ${labelVal}\n`,
+      6, 'before',
     );
-    if (fixed !== f.content)
+    if (fixed && fixed !== f.content)
       fixes.push({ path: f.path, content: fixed, explanation: `Added topologySpreadConstraints (maxSkew: 1, zone) — distributes pods evenly across availability zones; prevents all pods from landing in the same zone, which would cause an outage if that zone becomes unavailable`, confidence: 88 });
   }
   return fixes;
@@ -1521,11 +1526,8 @@ export function fixServiceReadinessGate(files: Array<{ path: string; content: st
     if (!f.path.endsWith('.yaml') && !f.path.endsWith('.yml')) continue;
     if (!f.content.includes('kind: Deployment')) continue;
     if (f.content.includes('readinessGates') || !f.content.includes('readinessProbe')) continue;
-    const fixed = f.content.replace(
-      /(      containers:)/,
-      `      readinessGates:\n        - conditionType: "target-health.elbv2.k8s.aws/app-tg"\n      $1`,
-    );
-    if (fixed !== f.content)
+    const fixed = insertBesideKey(f.content, 'containers', '      readinessGates:\n        - conditionType: "target-health.elbv2.k8s.aws/app-tg"\n', 6, 'before');
+    if (fixed && fixed !== f.content)
       fixes.push({ path: f.path, content: fixed, explanation: 'Added AWS Load Balancer Controller readinessGate — pod is not included in the ALB target group until the target health condition is satisfied, preventing premature traffic routing', confidence: 83 });
   }
   return fixes;
@@ -1661,11 +1663,12 @@ export function fixLivenessReadinessProbes(logs: string, files: Array<{ path: st
     if (f.content.includes('readinessProbe') || f.content.includes('livenessProbe')) continue;
     const portMatch = f.content.match(/containerPort:\s*(\d+)/);
     const port = portMatch?.[1] ?? '8080';
-    const fixed = f.content.replace(
-      /(        ports:\s*\n)/,
-      `        readinessProbe:\n          httpGet:\n            path: /health\n            port: ${port}\n          initialDelaySeconds: 15\n          periodSeconds: 5\n          failureThreshold: 3\n        livenessProbe:\n          httpGet:\n            path: /health\n            port: ${port}\n          initialDelaySeconds: 30\n          periodSeconds: 15\n          failureThreshold: 3\n        $1`,
+    const fixed = insertBesideKey(
+      f.content, 'image',
+      `        readinessProbe:\n          httpGet:\n            path: /health\n            port: ${port}\n          initialDelaySeconds: 15\n          periodSeconds: 5\n          failureThreshold: 3\n        livenessProbe:\n          httpGet:\n            path: /health\n            port: ${port}\n          initialDelaySeconds: 30\n          periodSeconds: 15\n          failureThreshold: 3\n`,
+      8,
     );
-    if (fixed !== f.content)
+    if (fixed && fixed !== f.content)
       fixes.push({ path: f.path, content: fixed, explanation: `Added readinessProbe (delay 15s) + livenessProbe (delay 30s) on port ${port} — prevents traffic routing before app is ready and auto-restarts unresponsive containers`, confidence: 92 });
   }
   return fixes;

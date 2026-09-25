@@ -81,7 +81,9 @@ export function fixMissingDBService(logs: string, files: Array<{ path: string; c
   const fixes: RuleFix[] = [];
   for (const f of files) {
     if (!isGitHubWorkflow(f.path)) continue;
-    if (f.content.includes('services:') || f.content.includes('postgres')) continue;
+    // Skip only when a database service is actually declared — a DATABASE_URL
+    // like postgresql://… contains "postgres" but provides no server.
+    if (/^\s+services:/m.test(f.content) || /image:\s*['"]?postgres/i.test(f.content)) continue;
     if (!f.content.includes('DATABASE_URL') && !f.content.includes('prisma') && !f.content.includes('knex')) continue;
     const lines = f.content.split('\n');
     const out: string[] = [];

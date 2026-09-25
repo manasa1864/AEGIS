@@ -1,0 +1,28 @@
+# Aegis fix catalog #024 — Regex used where a branch glob is expected
+#
+# Tier:       1 · Simple
+# Category:   invalid_trigger (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Workflow was not triggered: branch filter '^release/.*$' is a regular expression — invalid trigger event filter (GitHub uses glob patterns)
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Fixed branch filter pattern — GitHub Actions uses minimatch glob patterns, not regular expressions
+#     - patterns like ^main$ or .* are invalid
+#     - use "main" or "feature/**" instead
+#
+# Apply:      git apply 01-simple/024-invalid_trigger.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -2,7 +2,7 @@
+ on:
+   push:
+     branches:
+-      - '^release/.*$'
++      - 'release/**'
+     paths-ignore:
+       - '**.md'
+       - 'docs/**'

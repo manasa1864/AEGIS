@@ -1,0 +1,31 @@
+# Aegis fix catalog #117 — Sequential scan on a foreign key
+#
+# Tier:       4 · Advanced
+# Category:   missing_db_index (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Seq Scan on "User"  (cost=0.00..18334.00 rows=1 width=40)
+#   |   Filter: ("orgId" = 42)
+#   | slow query — missing index hint on User.orgId
+#
+# How it is solved:
+#   CREATE db/migrations/20260925174809_add_index_target_table_indexed_column.sql
+#     - Created migration with CREATE INDEX CONCURRENTLY on target_table.indexed_column — sequential scan detected
+#
+# Apply:      git apply 04-advanced/117-missing_db_index.diff
+diff --git a/db/migrations/20260925174809_add_index_target_table_indexed_column.sql b/db/migrations/20260925174809_add_index_target_table_indexed_column.sql
+new file mode 100644
+--- /dev/null
++++ b/db/migrations/20260925174809_add_index_target_table_indexed_column.sql
+@@ -0,0 +1,10 @@
++-- aegis: auto-generated migration — sequential scan detected on target_table.indexed_column
++
++-- Up
++CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_target_table_indexed_column
++  ON target_table (indexed_column);
++
++ANALYZE target_table;
++
++-- Down
++-- DROP INDEX CONCURRENTLY IF EXISTS idx_target_table_indexed_column;

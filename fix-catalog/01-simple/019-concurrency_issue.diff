@@ -1,0 +1,28 @@
+# Aegis fix catalog #019 — Runs cancelling each other via concurrency group
+#
+# Tier:       1 · Simple
+# Category:   concurrency_issue (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Canceling since a higher priority waiting request for 'ci-refs/heads/main' exists
+#   | This run has been cancelled by concurrency group
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added concurrency with cancel-in-progress: true for PR workflows — when a developer pushes a new commit while CI is running, the old run is redundant
+#     - cancelling it frees runners immediately and reduces queue wait time for the new run
+#
+# Apply:      git apply 01-simple/019-concurrency_issue.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -1,4 +1,8 @@
+ name: CI
++concurrency:
++  group: pr-${{ github.event.pull_request.number }}
++  cancel-in-progress: true
++
+ on:
+   push:
+     branches: [main]

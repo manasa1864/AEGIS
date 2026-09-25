@@ -1,0 +1,39 @@
+# Aegis fix catalog #023 — Husky hooks installing on the CI runner
+#
+# Tier:       1 · Simple
+# Category:   husky_hook_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | > app@1.0.0 prepare
+#   | > husky install
+#   | .husky/pre-commit: line 4: lint-staged: command not found
+#   | husky - pre-commit hook exited with code 127 (error)
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added HUSKY=0 — Husky hooks run during npm install and fail in CI because .git is in an unexpected state or hooks reference interactive tools (lint-staged, commitlint) not available on runners
+#     - Added fetch-depth: 0 to actions/checkout — shallow clone (default depth=1) omits git tags and full history
+#     - semantic versioning, git describe, and changelog tools require full history
+#
+# Apply:      git apply 01-simple/023-husky_hook_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -12,6 +12,7 @@
+   group: ci-${{ github.ref }}
+   cancel-in-progress: true
+ env:
++  HUSKY: 0
+   CI: 'true'
+   NODE_ENV: test
+ jobs:
+@@ -20,6 +21,8 @@
+     timeout-minutes: 15
+     steps:
+       - uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
+       - uses: actions/setup-node@v4
+         with:
+           node-version: 20

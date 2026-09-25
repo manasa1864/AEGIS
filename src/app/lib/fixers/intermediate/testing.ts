@@ -1004,7 +1004,7 @@ export function fixModuleNameMapper(logs: string, files: Array<{ path: string; c
   if (!/Cannot find module.*@\/|Cannot find module.*~\/|moduleNameMapper/i.test(logs)) return [];
   const fixes: RuleFix[] = [];
   const tsconfig = files.find(f => f.path === 'tsconfig.json');
-  let aliases: Record<string, string> = { '^@/(.*)$': '<rootDir>/src/$1' };
+  const aliases: Record<string, string> = { '^@/(.*)$': '<rootDir>/src/$1' };
   if (tsconfig) {
     try {
       const cfg = JSON.parse(tsconfig.content) as { compilerOptions?: { paths?: Record<string, string[]> } };

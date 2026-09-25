@@ -1,0 +1,28 @@
+# Aegis fix catalog #013 — Secret used in a script but never mapped into `env:`
+#
+# Tier:       1 · Simple
+# Category:   env_mapping_error (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error: API_KEY is undefined — env variable not mapped into the step environment
+#   | environment injection failed for API_KEY
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added env: block to expose secrets as environment variables — shell scripts access secrets via $VAR_NAME, not ${{ secrets.X }}
+#     - secrets must be mapped to env vars explicitly for subprocesses to read them
+#
+# Apply:      git apply 01-simple/013-env_mapping_error.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -25,5 +25,7 @@
+           node-version: 20
+           cache: npm
+       - run: npm ci
+-      - run: |
++      - env:
++          API_KEY: ${{ secrets.API_KEY }}
++        run: |
+           node scripts/smoke.js --key "$API_KEY"

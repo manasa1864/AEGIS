@@ -1,0 +1,32 @@
+# Aegis fix catalog #119 — Reads from a lagging replica
+#
+# Tier:       4 · Advanced
+# Category:   db_replication_lag (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error: replication lag 43s exceeds threshold 5s — replica behind primary
+#   | stale read detected on read replica
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added PRIMARY/REPLICA DATABASE_URL split — replication lag causes stale reads when tests mix primary writes with replica reads
+#     - Added DATABASE_READ_URL / DATABASE_WRITE_URL split — reading from a replica immediately after a write sees stale data
+#     - always-write-primary prevents this
+#
+# Apply:      git apply 04-advanced/119-db_replication_lag.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,6 +14,11 @@
+ env:
+   CI: 'true'
+   NODE_ENV: test
++  # aegis: read replica lag — use primary DB_URL for writes, replica for reads
++  DATABASE_URL: ${{ env.PRIMARY_DATABASE_URL || env.DATABASE_URL }}
++  DATABASE_REPLICA_URL: ${{ env.REPLICA_DATABASE_URL || env.DATABASE_URL }}
++  DATABASE_READ_URL: ${{ secrets.DATABASE_REPLICA_URL || secrets.DATABASE_PRIMARY_URL }}
++  DATABASE_WRITE_URL: ${{ secrets.DATABASE_PRIMARY_URL }}
+ jobs:
+   build:
+     runs-on: ubuntu-latest

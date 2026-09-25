@@ -20,12 +20,23 @@ const PORT = process.env.PORT || 3001;
 app.use(cors({ origin: ['http://localhost:5173', 'http://localhost:3000', /\.vercel\.app$/] }));
 app.use(express.json());
 
-// MCP client pool keyed by gitlab token (one connection per token)
+// MCP client pool keyed by gitlab token (one connection per token).
+// Stores the connect *promise* so concurrent first requests share a single
+// spawned MCP process instead of each launching their own.
 const pool = new Map();
 
-async function getClient(gitlabToken) {
-  if (pool.has(gitlabToken)) return pool.get(gitlabToken);
+function getClient(gitlabToken) {
+  if (!pool.has(gitlabToken)) {
+    const pending = connectClient(gitlabToken).catch((err) => {
+      pool.delete(gitlabToken); // don't cache failed connections
+      throw err;
+    });
+    pool.set(gitlabToken, pending);
+  }
+  return pool.get(gitlabToken);
+}
 
+async function connectClient(gitlabToken) {
   const transport = new StdioClientTransport({
     command: 'npx',
     args: ['-y', '@gitlabhq/gitlab-mcp@latest', '--transport', 'stdio'],
@@ -41,11 +52,14 @@ async function getClient(gitlabToken) {
     { capabilities: { tools: {} } },
   );
 
+  // Evict dead connections so the next request reconnects instead of
+  // hitting a closed/errored client forever. Use the Client's hooks — assigning
+  // transport.onclose directly would replace the SDK's own handler, leaving
+  // in-flight requests hanging forever when the MCP process dies.
+  client.onclose = () => pool.delete(gitlabToken);
+  client.onerror = () => pool.delete(gitlabToken);
+
   await client.connect(transport);
-
-  transport.onclose = () => pool.delete(gitlabToken);
-
-  pool.set(gitlabToken, client);
   return client;
 }
 

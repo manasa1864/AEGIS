@@ -4,6 +4,7 @@
   "framework": "vite",
   "rewrites": [
     { "source": "/api/gemini/:path*", "destination": "https://generativelanguage.googleapis.com/:path*" },
+    { "source": "/api/gcloud/:path*", "destination": "https://generativelanguage.googleapis.com/:path*" },
     { "source": "/api/groq/:path*", "destination": "https://api.groq.com/:path*" },
     { "source": "/api/anthropic/:path*", "destination": "https://api.anthropic.com/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }

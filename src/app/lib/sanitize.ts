@@ -10,7 +10,7 @@
 // ── 1. Prompt-injection sanitisation ─────────────────────────────────────────
 
 const INJECTION_PATTERNS: RegExp[] = [
-  /ignore\s+(previous|all|prior|above)\s+instructions?/gi,
+  /ignore\s+(?:(?:all|any|the)\s+)?(?:previous|prior|above|earlier|preceding|system)\s+instructions?/gi,
   /forget\s+(everything|all\s+previous|prior)/gi,
   /you\s+are\s+now\s+(a|an)\s+/gi,
   /act\s+as\s+(a|an)\s+(unrestricted|evil|unfiltered|jailbroken)/gi,

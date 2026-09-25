@@ -1,0 +1,29 @@
+# Aegis fix catalog #005 — Workflow Node version older than the project requires
+#
+# Tier:       1 · Simple
+# Category:   node_version (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | npm ERR! code EBADENGINE
+#   | npm ERR! engine Unsupported engine
+#   | npm ERR! notsup Required: {"node":">=20"}
+#   | npm ERR! notsup Actual:   {"npm":"6.14.18","node":"v14.21.3"}
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Updated node-version to 20 to match package.json engines.node=">=20" — running a different Node version silently breaks modules that use version-specific APIs
+#
+# Apply:      git apply 01-simple/005-node_version.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -22,7 +22,7 @@
+       - uses: actions/checkout@v4
+       - uses: actions/setup-node@v4
+         with:
+-          node-version: 14
++          node-version: '20'
+           cache: npm
+       - run: npm ci
+       - run: npm run build

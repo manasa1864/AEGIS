@@ -1,0 +1,27 @@
+# Aegis fix catalog #063 — Checkout of a private repo denied
+#
+# Tier:       3 · Intermediate
+# Category:   git_access_denied (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | remote: Repository not found.
+#   | fatal: repository 'https://github.com/acme/infra.git/' not found or no access
+#   | git access denied
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added GH_PAT token for cross-repo checkout — GITHUB_TOKEN only has access to the workflow repository
+#     - cross-repo checkout requires a PAT with repo scope or a GitHub App token installed on both repos
+#
+# Apply:      git apply 03-intermediate/063-git_access_denied.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -27,5 +27,6 @@
+       - run: npm ci
+       - uses: actions/checkout@v4
+         with:
++          token: ${{ secrets.GH_PAT }}  # PAT with repo scope required for cross-repo checkout
+           repository: acme/infra
+           path: infra

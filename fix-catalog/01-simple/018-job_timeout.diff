@@ -1,0 +1,40 @@
+# Aegis fix catalog #018 — Job exceeded the runner time limit
+#
+# Tier:       1 · Simple
+# Category:   job_timeout (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | The job running on runner GitHub Actions 12 has exceeded the maximum execution time of 360 minutes.
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added timeout-minutes: 30 to jobs — job exceeded GitHub runner limit (6h default)
+#     - explicit timeout at 30 minutes frees runners faster and surfaces hung processes earlier
+#
+# Apply:      git apply 01-simple/018-job_timeout.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -1,11 +1,13 @@
+ name: CI
+ on:
+   push:
++    timeout-minutes: 30
+     branches: [main]
+     paths-ignore:
+       - '**.md'
+       - 'docs/**'
+   pull_request:
++    timeout-minutes: 30
+ permissions:
+   contents: read
+ concurrency:
+@@ -16,6 +18,7 @@
+   NODE_ENV: test
+ jobs:
+   build:
++    timeout-minutes: 30
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4

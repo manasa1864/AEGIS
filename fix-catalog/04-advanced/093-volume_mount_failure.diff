@@ -1,0 +1,41 @@
+# Aegis fix catalog #093 — Bind mount path invalid on the runner
+#
+# Tier:       4 · Advanced
+# Category:   volume_mount_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error response from daemon: invalid mount config for type "bind": bind source path does not exist: /data
+#   | volume mount failed
+#
+# How it is solved:
+#   MODIFY docker-compose.yml
+#     - Removed version: field from Docker Compose — the version: top-level field is obsolete in Compose v2 (docker compose CLI)
+#     - its presence generates a deprecation warning and in some versions causes validation errors
+#     - Added init: true to docker-compose service — equivalent to docker run --init
+#     - runs tini as PID 1, ensuring SIGTERM is forwarded to the app and zombie processes are reaped
+#     - prevents 10-second shutdown delays
+#     - Added logging limits (10MB x 3 files) to docker-compose — without log rotation, container logs grow unboundedly and can fill the host disk, causing all containers on the host to fail
+#
+# Apply:      git apply 04-advanced/093-volume_mount_failure.diff
+diff --git a/docker-compose.yml b/docker-compose.yml
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -1,4 +1,3 @@
+-version: "3.8"
+ services:
+   app:
+     build: .
+@@ -8,6 +7,12 @@
+       - db
+   db:
+     image: postgres:16
++    logging:
++      driver: json-file
++      options:
++        max-size: "10m"
++        max-file: "3"
++    init: true  # Run tini as PID 1 for proper signal forwarding and zombie reaping
+     environment:
+       POSTGRES_PASSWORD: postgres
+     volumes:

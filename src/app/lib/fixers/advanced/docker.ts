@@ -17,7 +17,7 @@ export function fixCreateMinimalDockerfile(files: Array<{ path: string; content:
 
   const pkgFile = files.find(f => f.path === 'package.json');
   let mainFile = 'src/app.js';
-  let port = '3000';
+  const port = '3000';
   if (pkgFile) {
     try {
       const pkg = JSON.parse(pkgFile.content) as { main?: string; scripts?: Record<string, string> };

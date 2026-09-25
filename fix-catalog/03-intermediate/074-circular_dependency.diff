@@ -1,0 +1,32 @@
+# Aegis fix catalog #074 — Jobs that `needs:` each other
+#
+# Tier:       3 · Intermediate
+# Category:   circular_dependency (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | The workflow is not valid. .github/workflows/ci.yml: Job 'lint' depends on job 'test' which creates a circular dependency
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Removed circular needs: from jobs [lint, test] — circular dependencies cause GitHub Actions to reject the workflow with "cyclic dependency detected"
+#     - removed the problematic needs: entry
+#
+# Apply:      git apply 03-intermediate/074-circular_dependency.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -8,13 +8,11 @@
+   CI: 'true'
+ jobs:
+   lint:
+-    needs: test
+     runs-on: ubuntu-latest
+     timeout-minutes: 10
+     steps:
+       - run: echo lint
+   test:
+-    needs: lint
+     runs-on: ubuntu-latest
+     timeout-minutes: 10
+     steps:

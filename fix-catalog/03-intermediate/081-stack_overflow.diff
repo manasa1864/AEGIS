@@ -1,0 +1,28 @@
+# Aegis fix catalog #081 — Recursion exceeds the default stack
+#
+# Tier:       3 · Intermediate
+# Category:   stack_overflow (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | RangeError: Maximum call stack size exceeded
+#   |     at walk (/home/runner/work/app/app/src/tree.js:12:10)
+#   | maximum call stack size exceeded
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added --stack-size=65536 — RangeError: Maximum call stack exceeded
+#     - increased stack from 984KB to 64MB
+#
+# Apply:      git apply 03-intermediate/081-stack_overflow.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,6 +14,7 @@
+ env:
+   CI: 'true'
+   NODE_ENV: test
++  NODE_OPTIONS: --stack-size=65536  # 64MB, up from default 984KB
+ jobs:
+   build:
+     runs-on: ubuntu-latest

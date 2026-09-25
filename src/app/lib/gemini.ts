@@ -1,5 +1,8 @@
 import type { HealingEventRecord } from '../types';
 import type { ErrorDiagnosis } from './diagnostics';
+import { extractJson } from './jsonExtract';
+import { sanitizeForAI } from './sanitize';
+import { geminiGenerateUrl, geminiText } from './models';
 
 export interface Fix {
   path: string;
@@ -27,7 +30,7 @@ export async function analyzeAndFixWithGemini(
   diagnosis?: ErrorDiagnosis,
 ): Promise<AnalysisResult | null> {
   const filesText = files
-    .map(f => `### ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)
+    .map(f => `### ${f.path}\n\`\`\`\n${sanitizeForAI(f.content)}\n\`\`\``)
     .join('\n\n');
 
   const categoryBlock = diagnosis
@@ -75,54 +78,29 @@ Rules:
 - ranked_alternatives: up to 3 strategies considered but not applied (risk: "low"|"medium"|"high")
 - If you cannot determine a fix, return empty fixes[] and confidence below 40`;
 
-  const res = await fetch('/api/gemini/v1beta/models/gemini-2.0-flash:generateContent', {
+  const request = () => fetch(geminiGenerateUrl(), {
     method: 'POST',
-    headers: {
-      'x-goog-api-key': apiKey,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-    }),
-  });
+    headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+  }).catch(() => null); // network failure → let the caller fall back
 
-  if (!res.ok) {
-    if (res.status === 429) {
-      // Rate limited — wait 15s and retry once before giving up
-      await new Promise(r => setTimeout(r, 15000));
-      const retry = await fetch('/api/gemini/v1beta/models/gemini-2.0-flash:generateContent', {
-        method: 'POST',
-        headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-      }).catch(() => null);
-      if (!retry?.ok) return null;
-      const retryData = await retry.json();
-      const retryText: string = retryData.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-      try {
-        const m = retryText.match(/\{[\s\S]*\}/);
-        if (!m) return null;
-        const p = JSON.parse(m[0]) as Partial<AnalysisResult>;
-        return { analysis: p.analysis ?? '', confidence: typeof p.confidence === 'number' ? p.confidence : 75, fixes: p.fixes ?? [], ranked_alternatives: p.ranked_alternatives ?? [] };
-      } catch { return null; }
-    }
-    return null;
+  let res = await request();
+  if (res?.status === 429) {
+    // Rate limited — wait 15s and retry once before giving up
+    await new Promise(r => setTimeout(r, 15000));
+    res = await request();
   }
-  const data = await res.json();
-  const text: string = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  if (!res?.ok) return null;
 
-  try {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return null;
-    const parsed = JSON.parse(match[0]) as Partial<AnalysisResult>;
-    return {
-      analysis: parsed.analysis ?? '',
-      confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 75,
-      fixes: parsed.fixes ?? [],
-      ranked_alternatives: parsed.ranked_alternatives ?? [],
-    };
-  } catch {
-    return null;
-  }
+  const data = await res.json().catch(() => null);
+  const parsed = extractJson<Partial<AnalysisResult>>(geminiText(data));
+  if (!parsed) return null;
+  return {
+    analysis: parsed.analysis ?? '',
+    confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 75,
+    fixes: parsed.fixes ?? [],
+    ranked_alternatives: parsed.ranked_alternatives ?? [],
+  };
 }
 
 export async function generatePostmortem(
@@ -157,7 +135,7 @@ Write a professional postmortem in markdown format with these sections:
 
 Be technical, concise, and actionable. Each section should be 2–4 sentences.`;
 
-  const res = await fetch('/api/gemini/v1beta/models/gemini-2.0-flash:generateContent', {
+  const res = await fetch(geminiGenerateUrl(), {
     method: 'POST',
     headers: {
       'x-goog-api-key': apiKey,
@@ -175,6 +153,5 @@ Be technical, concise, and actionable. Each section should be 2–4 sentences.`;
       : `Gemini request failed (HTTP ${res.status})`;
     throw new Error(msg);
   }
-  const data = await res.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  return geminiText(await res.json());
 }

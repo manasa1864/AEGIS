@@ -1,0 +1,33 @@
+# Aegis fix catalog #022 — Prettier check fails with no shared config
+#
+# Tier:       1 · Simple
+# Category:   lint_format_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | [warn] src/index.ts
+#   | [warn] Code style issues found in 1 file. Run Prettier with --write to fix.
+#   | Prettier check failed
+#
+# How it is solved:
+#   CREATE .prettierrc
+#     - Created .prettierrc — Prettier format check failed because no configuration existed
+#     - configured with standard defaults (single quotes, trailing commas, LF line endings)
+#
+# Apply:      git apply 01-simple/022-lint_format_failure.diff
+diff --git a/.prettierrc b/.prettierrc
+new file mode 100644
+--- /dev/null
++++ b/.prettierrc
+@@ -0,0 +1,11 @@
++{
++  "semi": true,
++  "singleQuote": true,
++  "trailingComma": "all",
++  "printWidth": 100,
++  "tabWidth": 2,
++  "useTabs": false,
++  "bracketSpacing": true,
++  "arrowParens": "always",
++  "endOfLine": "lf"
++}

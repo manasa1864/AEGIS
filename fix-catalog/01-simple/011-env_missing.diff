@@ -1,0 +1,38 @@
+# Aegis fix catalog #011 — Required environment variable not set
+#
+# Tier:       1 · Simple
+# Category:   env_missing (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error: API_URL is required
+#   |     at loadConfig (/home/runner/work/app/app/src/config.js:8:11)
+#   | env API_URL not set
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added env: block to expose secrets as environment variables — shell scripts access secrets via $VAR_NAME, not ${{ secrets.X }}
+#     - secrets must be mapped to env vars explicitly for subprocesses to read them
+#     - Added default API_URL='http://localhost:3000/api' — env var was missing
+#     - app/test framework crashed because it expected the variable to exist
+#
+# Apply:      git apply 01-simple/011-env_missing.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,6 +14,7 @@
+ env:
+   CI: 'true'
+   NODE_ENV: test
++  API_URL: 'http://localhost:3000/api'
+ jobs:
+   build:
+     runs-on: ubuntu-latest
+@@ -25,4 +26,6 @@
+           node-version: 20
+           cache: npm
+       - run: npm ci
+-      - run: node scripts/smoke.js --url "$API_URL"
++      - env:
++          API_URL: ${{ secrets.API_URL }}
++        run: node scripts/smoke.js --url "$API_URL"

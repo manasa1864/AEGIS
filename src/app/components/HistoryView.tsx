@@ -423,18 +423,18 @@ export function HistoryView({ groqKey, refreshKey }: HistoryViewProps) {
   };
 
   // Initial load
-  useEffect(() => { fetchEvents(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { fetchEvents(); }, []);  
 
   // Immediate re-fetch whenever a new fix is committed (Dashboard bumps refreshKey)
   useEffect(() => {
     if (refreshKey !== undefined && refreshKey > 0) fetchEvents();
-  }, [refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [refreshKey]);  
 
   // Background poll every 5 s — fast enough to feel live
   useEffect(() => {
     const handle = setInterval(fetchEvents, 5_000);
     return () => clearInterval(handle);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);  
 
   const handlePostmortemSaved = (id: number, text: string) => {
     setEvents(prev => prev.map(e => e.id === id ? { ...e, postmortem: text } : e));

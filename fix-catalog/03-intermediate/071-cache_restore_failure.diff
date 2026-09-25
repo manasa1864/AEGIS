@@ -1,0 +1,27 @@
+# Aegis fix catalog #071 — Cache restore fails with no fallback keys
+#
+# Tier:       3 · Intermediate
+# Category:   cache_restore_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Warning: Failed to restore cache: Cache service responded with 503
+#   | Error restoring cache — cache restore failed
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added restore-keys fallback — without restore-keys, a cache miss means zero caching benefit for that run
+#     - restore-keys allows partial matches (same OS, different hash) so at least some dependencies are cached and install time is reduced
+#
+# Apply:      git apply 03-intermediate/071-cache_restore_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -24,4 +24,7 @@
+         with:
+           path: ~/.npm
+           key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
++          restore-keys: |
++            - ${{ runner.os }}-deps-
++            - ${{ runner.os }}-
+       - run: npm ci

@@ -1,5 +1,6 @@
 import { motion } from 'motion/react';
 import { Activity, Code, AlertTriangle, Wrench, CheckCircle, Cpu, Database, Network } from 'lucide-react';
+import { type HealingRun, nodeStatusFor, edgeActive } from '../lib/healingRun';
 
 interface SystemNode {
   id: string;
@@ -19,10 +20,13 @@ interface Connection {
 interface SystemGraphProps {
   status: 'idle' | 'healing' | 'stopped' | 'healthy';
   activeNode?: string;
+  /** Live run state — when present, node/edge states come from real healing progress. */
+  run?: HealingRun;
 }
 
-export function SystemGraph({ status, activeNode }: SystemGraphProps) {
-  const nodes: SystemNode[] = [
+export function SystemGraph({ status, activeNode, run }: SystemGraphProps) {
+  const live = !!run?.startedAt;
+  const baseNodes: SystemNode[] = [
     {
       id: 'core',
       label: 'NEURAL_CORE',
@@ -81,7 +85,13 @@ export function SystemGraph({ status, activeNode }: SystemGraphProps) {
     },
   ];
 
-  const connections: Connection[] = [
+  // With a live run, every node reflects its phase: active while working, green
+  // once done, red on failure — and stays that way after the run moves on.
+  const nodes: SystemNode[] = live
+    ? baseNodes.map(n => ({ ...n, status: nodeStatusFor(run!, n.id) }))
+    : baseNodes;
+
+  const baseConnections: Connection[] = [
     { from: 'code-push', to: 'core', status: activeNode === 'code-push' ? 'active' : 'idle' },
     { from: 'database', to: 'core', status: 'idle' },
     { from: 'core', to: 'pipeline', status: activeNode === 'pipeline' ? 'error' : 'idle' },
@@ -91,6 +101,9 @@ export function SystemGraph({ status, activeNode }: SystemGraphProps) {
     { from: 'fix-engine', to: 'validation', status: 'idle' },
     { from: 'validation', to: 'pipeline', status: 'idle' },
   ];
+  const connections: Connection[] = live
+    ? baseConnections.map(c => ({ ...c, status: edgeActive(run!, c.from, c.to) ? 'active' : 'idle' }))
+    : baseConnections;
 
   const getNodeColor = (nodeStatus: SystemNode['status']) => {
     switch (nodeStatus) {
@@ -368,9 +381,19 @@ export function SystemGraph({ status, activeNode }: SystemGraphProps) {
               </div>
             </motion.div>
             <div className="font-mono">
-              <div className="text-xl text-[#CAAA98] tracking-widest">[ HALTED ]</div>
-              <div className="text-xs text-[#9A8678] mt-2 tracking-wider">NO_PROGRESS_DETECTED</div>
-              <div className="text-[10px] text-[#9A8678]/60 mt-4">MANUAL_INTERVENTION_REQUIRED</div>
+              <div className="text-xl text-[#CAAA98] tracking-widest">
+                {run?.outcome?.kind === 'safe_mode' ? '[ ANALYSIS_ONLY ]' : run?.outcome?.kind === 'cancelled' ? '[ CANCELLED ]' : '[ HALTED ]'}
+              </div>
+              <div className="text-xs text-[#9A8678] mt-2 tracking-wider max-w-md mx-auto break-words">
+                {run?.outcome?.reason ?? 'NO_PROGRESS_DETECTED'}
+              </div>
+              <div className="text-[10px] text-[#9A8678]/60 mt-4">
+                {run?.outcome?.kind === 'safe_mode'
+                  ? 'REVIEW_PROPOSED_CHANGES_BELOW'
+                  : run && run.fixes.length > 0
+                    ? `${run.fixes.filter(f => f.status === 'committed').length}/${run.fixes.length} FIXES_COMMITTED · SEE_CHANGES_BELOW`
+                    : 'MANUAL_INTERVENTION_REQUIRED'}
+              </div>
             </div>
           </motion.div>
         </motion.div>
