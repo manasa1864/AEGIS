@@ -197,7 +197,7 @@ export function useHealingProcess({
     let eventFinalized = false;
     const createEvent = async (ev: Parameters<typeof apiCreateEvent>[0]) => {
       try {
-        const created = await createEvent(ev);
+        const created = await apiCreateEvent(ev);
         trackedEventId = created.id;
         return created;
       } catch (err) {
@@ -207,7 +207,7 @@ export function useHealingProcess({
     };
     const updateEvent = async (id: number, patch: Parameters<typeof apiUpdateEvent>[1]) => {
       if (patch.status && patch.status !== 'healing') eventFinalized = true;
-      await updateEvent(id, patch).catch(() => { /* history only — never block healing */ });
+      await apiUpdateEvent(id, patch).catch(() => { /* history only — never block healing */ });
     };
 
     // ── Healing-ladder plumbing shared by the GitHub and GitLab flows ──────────
