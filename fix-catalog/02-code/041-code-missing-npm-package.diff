@@ -1,0 +1,42 @@
+# Aegis fix catalog #041 — Imported npm package never declared
+#
+# Tier:       2 · Source code
+# Category:   missing_dependency
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'zod' imported from /home/runner/work/app/app/src/schema.js
+#   |     at packageResolve (node:internal/modules/esm/resolve:854:9)
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added --legacy-peer-deps — npm 7+ enforces strict peer dep resolution (ERESOLVE)
+#     - --legacy-peer-deps restores npm 6 permissive behaviour allowing conflicting peer deps to coexist
+#   MODIFY package.json
+#     - Declared missing package zod in package.json — the code imports it but it was never added, so installs on a clean runner cannot resolve the import. Pinned to "latest": replace with the exact version and regenerate the lockfile before merging
+#
+# Apply:      git apply 02-code/041-code-missing-npm-package.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -24,6 +24,6 @@
+         with:
+           node-version: 20
+           cache: npm
+-      - run: npm ci
++      - run: npm ci --legacy-peer-deps
+       - run: npm run build
+       - run: npm test
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -11,7 +11,8 @@
+     "lint": "eslint ."
+   },
+   "dependencies": {
+-    "express": "^4.19.2"
++    "express": "^4.19.2",
++    "zod": "latest"
+   },
+   "devDependencies": {
+     "typescript": "^5.4.0",

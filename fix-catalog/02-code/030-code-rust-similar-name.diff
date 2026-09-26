@@ -1,0 +1,29 @@
+# Aegis fix catalog #030 — Rust typo — apply rustc's similar-name suggestion
+#
+# Tier:       2 · Source code
+# Category:   rust_build_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | error[E0425]: cannot find value `conut` in this scope
+#   |  --> src/main.rs:3:20
+#   |   |
+#   | 3 |     println!("{}", conut);
+#   |   |                    ^^^^^ help: a local variable with a similar name exists: `count`
+#   | error: could not compile `app` (bin "app") due to 1 previous error
+#
+# How it is solved:
+#   MODIFY src/main.rs
+#     - Applied the compiler's own "did you mean" suggestion: conut → count (line 3) — the compiler named the correct identifier
+#     - only that token at the reported location was changed
+#
+# Apply:      git apply 02-code/030-code-rust-similar-name.diff
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,4 +1,4 @@
+ fn main() {
+     let count = 3;
+-    println!("{}", conut);
++    println!("{}", count);
+ }

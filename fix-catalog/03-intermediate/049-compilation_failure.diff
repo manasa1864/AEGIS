@@ -1,0 +1,42 @@
+# Aegis fix catalog #049 — Third-party type errors block `tsc`
+#
+# Tier:       3 · Intermediate
+# Category:   compilation_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | node_modules/@types/express-serve-static-core/index.d.ts(1203,24): error TS2344: Type 'T' does not satisfy the constraint.
+#   | src/index.ts(1,8): error TS1259: Module can only be default-imported using the 'esModuleInterop' flag
+#   | Compilation failed
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added --skipLibCheck to tsc — type errors in third-party .d.ts files were blocking compilation
+#   MODIFY tsconfig.json
+#     - Set TypeScript interop options — skipLibCheck skips type errors inside third-party .d.ts files and esModuleInterop/allowSyntheticDefaultImports fix default-import errors
+#     - strict mode is left untouched so real type errors in your code still fail the build
+#
+# Apply:      git apply 03-intermediate/049-compilation_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -25,4 +25,4 @@
+           node-version: 20
+           cache: npm
+       - run: npm ci
+-      - run: npx tsc -p .
++      - run: npx tsc --skipLibCheck -p .
+diff --git a/tsconfig.json b/tsconfig.json
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -3,6 +3,9 @@
+     "target": "ES2022",
+     "module": "ESNext",
+     "strict": true,
+-    "outDir": "dist"
++    "outDir": "dist",
++    "skipLibCheck": true,
++    "esModuleInterop": true,
++    "allowSyntheticDefaultImports": true
+   }
+ }

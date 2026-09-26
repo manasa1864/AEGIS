@@ -21,6 +21,8 @@ export interface AnalysisResult {
   confidence: number;
   fixes: Fix[];
   ranked_alternatives: RankedAlternative[];
+  /** Files the model returned but had only seen partially — refused, never applied. */
+  refusedPartial?: string[];
 }
 
 export async function analyzeAndFixWithGroq(
@@ -33,19 +35,26 @@ export async function analyzeAndFixWithGroq(
   const MAX_FILE = 3000;
   const MAX_TOTAL = 12000;
   let totalChars = 0;
+  // Files the model did NOT see in full (truncated, or left out of the budget).
+  // It is asked to return complete file contents, so a "fix" to one of these
+  // would silently drop everything past what it saw — those fixes are refused.
+  const partiallySeen = new Set<string>();
   const filesText = files
     .map(f => {
       const safe = sanitizeForAI(f.content); // repo content is untrusted prompt input
-      const content = safe.length > MAX_FILE ? safe.slice(0, MAX_FILE) + '\n…[truncated]' : safe;
-      return `### ${f.path}\n\`\`\`\n${content}\n\`\`\``;
+      const truncated = safe.length > MAX_FILE;
+      const content = truncated ? safe.slice(0, MAX_FILE) + '\n…[truncated — do NOT return this file in fixes[]]' : safe;
+      return { path: f.path, truncated, block: `### ${f.path}${truncated ? ' (TRUNCATED)' : ''}\n\`\`\`\n${content}\n\`\`\`` };
     })
-    .filter(block => {
+    .filter(({ path, truncated, block }) => {
       // Only count blocks that are actually kept — otherwise one oversized
       // file poisons the budget and later small files get dropped for free.
-      if (totalChars + block.length > MAX_TOTAL) return false;
+      if (totalChars + block.length > MAX_TOTAL) { partiallySeen.add(path); return false; }
+      if (truncated) partiallySeen.add(path);
       totalChars += block.length;
       return true;
     })
+    .map(b => b.block)
     .join('\n\n');
 
   // Build a category block for EVERY matched diagnosis, ranked by confidence.
@@ -169,11 +178,15 @@ Always produce at least one fix for the failing workflow file(s). Never return e
       analysis = `${parsed.primary_cause}${secondary ? ` — Secondary: ${secondary}` : ''}. ${analysis}`.trim();
     }
 
+    const allFixes = parsed.fixes ?? [];
+    const fixes = allFixes.filter(f => !partiallySeen.has(f?.path));
+    const refused = allFixes.filter(f => partiallySeen.has(f?.path)).map(f => f.path);
     return {
       analysis,
       confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 75,
-      fixes: parsed.fixes ?? [],
+      fixes,
       ranked_alternatives: parsed.ranked_alternatives ?? [],
+      ...(refused.length ? { refusedPartial: refused } : {}),
     };
   }
 }

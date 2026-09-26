@@ -2,14 +2,12 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { StreamEntry } from '../components/IntelligenceStream';
 import { SystemStatus, Project } from '../types';
 import { getAllLatestFailedRuns, getFailedRunsForBranch, getRunJobs, getWorkflowFiles, getJobLogs, createBranch, commitFile, createPR, waitForBranchCI, getOpenAegisPR } from '../lib/github';
-import { getLatestFailedPipeline, getFailedPipelineOnBranch, getPipelineJobs, getWorkflowFiles as getGitlabWorkflowFiles, getJobLogs as getGitlabJobLogs, createBranch as createGitlabBranch, commitFile as commitGitlabFile, createMR, waitForBranchPipeline } from '../lib/gitlab';
+import { getNewestPipelineOnRef, getFailedPipelineOnBranch, getPipelineJobs, getWorkflowFiles as getGitlabWorkflowFiles, getJobLogs as getGitlabJobLogs, createBranch as createGitlabBranch, commitFile as commitGitlabFile, createMR, waitForBranchPipeline } from '../lib/gitlab';
 import { analyzeAndFixWithGemini } from '../lib/gemini';
 import { analyzeAndFixWithGroq } from '../lib/groq';
 import { analyzeWithGrounding } from '../lib/vertexai';
-import { categorizeAllErrors } from '../lib/diagnostics';
 import type { ErrorCategory } from '../lib/diagnostics';
 import { buildGithubContext, buildGitlabContext } from '../lib/contextBuilder';
-import { applyRuleBasedFixes } from '../lib/ruleBasedFixer';
 import { confidenceToLevel } from '../lib/errorLevel';
 import { getEmbedding } from '../lib/ai';
 import { saveFailure, findSimilarFailure, timeAgoMs } from '../lib/failureMemory';
@@ -17,12 +15,21 @@ import { apiCreateEvent, apiUpdateEvent } from '../lib/backendApi';
 import { chunkLogs, sanitizeForAI } from '../lib/sanitize';
 import { validateFixes } from '../lib/fixValidator';
 import { detectFingerprint } from '../lib/repoFingerprint';
-import { clusterRootCauses, computeRuleConfidence, crossFileConsistencyCheck, getAlternativeStrategies } from '../lib/fixEngine';
 import { GEMINI_MODEL, GROQ_MODEL } from '../lib/models';
 import {
-  type HealingRun, emptyRun, startRun, withPhase, withFixes, withExtraFixes, withFixStatus,
-  withOutcome, applyStreamMessage, inferOutcome,
+  type HealingRun, type FixSource, type StrategyId, emptyRun, startRun, withPhase, withFixes, withExtraFixes,
+  withFixStatus, withOutcome, withStrategy, applyStreamMessage, inferOutcome,
 } from '../lib/healingRun';
+import { errorSignature, rememberFix, markVerified } from '../lib/strategies/knownFixes';
+import type { FailingRun, Platform, StrategyContext } from '../lib/strategies/types';
+import type { LadderResult } from '../lib/strategies/ladder';
+
+const SOURCE_FOR: Record<StrategyId, FixSource> = { memory: 'memory', rules: 'rule', flaky: 'rule', autofix: 'autofix', ai: 'ai', revert: 'rule' };
+const STRATEGY_NAME: Record<StrategyId, string> = {
+  memory: 'replayed known fix', rules: 'deterministic rules', flaky: 'flaky check',
+  autofix: "project's own auto-fixers", ai: 'AI analysis', revert: 'revert to last green',
+};
+const LOCKFILES = /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/;
 
 const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
@@ -123,7 +130,8 @@ export function useHealingProcess({
     setStreamEntries([]);
   };
 
-  const healRepo = async () => {
+  /** Start (or, if one is running, stop) a heal. `projectId` lets auto-heal target a repo directly. */
+  const healRepo = async (projectId?: string) => {
     if (healingRef.current) {
       runIdRef.current++;
       setRun(r => (r.startedAt && !r.outcome ? withOutcome(r, 'cancelled', 'Stopped by operator') : r));
@@ -138,7 +146,7 @@ export function useHealingProcess({
       return;
     }
 
-    const project = projects.find(p => p.id === selectedProject);
+    const project = projects.find(p => p.id === (projectId ?? selectedProject));
     if (!project) return;
 
     const runId = ++runIdRef.current;
@@ -163,6 +171,11 @@ export function useHealingProcess({
     healingStartRef.current = Date.now();
     setRun(startRun());
     setSystemStatus('healing');
+    // ~1,000 rules + the strategy ladder — code-split out of the initial bundle.
+    const {
+      applyRuleBasedFixes, categorizeAllErrors, clusterRootCauses, crossFileConsistencyCheck,
+      runHealingLadder, revertToLastGreen, runAutofixJob,
+    } = await import('../lib/healEngine');
     setStreamEntries([]);
     setLogs([]);
     setShowLogs(false);
@@ -175,6 +188,7 @@ export function useHealingProcess({
       const e: StreamEntry = { ...entry, id: String(++entryId) };
       setStreamEntries(prev => [...prev, e]);
       if (e.type === 'decision' || (e.type === 'result' && e.status === 'failure')) lastDecision = e.message;
+      if (e.message.startsWith('FIX_VERIFIED') && healSignature) markVerified(repoKey, healSignature);
       track(r => applyStreamMessage(r, e.message, e.url));
       setLogs(prev => [...prev, `[${e.timestamp ?? ts()}] ${e.message}`]);
     };
@@ -196,6 +210,83 @@ export function useHealingProcess({
       await updateEvent(id, patch).catch(() => { /* history only — never block healing */ });
     };
 
+    // ── Healing-ladder plumbing shared by the GitHub and GitLab flows ──────────
+    const repoKey = `${project.owner ?? ''}/${project.repoName ?? ''}`;
+    let healSignature = '';
+    let escalation: (() => Promise<void>) | undefined; // set per platform once the failing runs are known
+    const markStrategy = (id: StrategyId, state: 'active' | 'done' | 'failed' | 'skipped', note?: string) =>
+      track(r => withStrategy(r, id, state, note));
+    const strategyCtx = (platform: Platform, runs: FailingRun[], branchName: string): StrategyContext => ({
+      platform, pat: platform === 'gitlab' ? gitlabPat : githubPat,
+      owner: project.owner ?? '', repo: project.repoName ?? '', branch: branchName, failingRuns: runs,
+      isCancelled: cancelled,
+      log: (message, kind = 'info') => add({
+        type: kind === 'attempt' ? 'attempt' : kind === 'ok' || kind === 'fail' ? 'result' : 'info',
+        status: kind === 'ok' ? 'success' : kind === 'fail' ? 'failure' : undefined,
+        message, timestamp: ts(),
+      }),
+    });
+    const approvalGate = async (a: PendingApproval) => {
+      setSystemStatus('idle');
+      const ok = await waitForApproval(a);
+      if (!cancelled()) setSystemStatus('healing');
+      return ok;
+    };
+    /** Handle ladder outcomes that end the run. Returns true when the run is finished. */
+    const finishLadder = async (res: LadderResult, eventId: number | null): Promise<boolean> => {
+      if (res.kind === 'cancelled') return true;
+      if (res.kind === 'flaky') {
+        if (eventId !== null) await updateEvent(eventId, { status: 'healed', root_cause: 'Flaky failure — the failed jobs passed on rerun; no code change was needed', confidence: 90, recovery_time_ms: Date.now() - healingStartRef.current });
+        onEventUpdated?.();
+        track(r => withOutcome(r, 'flaky', 'The failed jobs passed when re-run — the code is fine, nothing was changed'));
+        setSystemStatus('healthy');
+        onHealingComplete?.(project.id, 'NO_ERROR');
+        endRun();
+        return true;
+      }
+      if (res.kind === 'reverted') {
+        add({ type: 'result', message: `PR_CREATED :: ${res.label}${res.verified ? ' — CI green on the revert' : ' — CI will run on the PR'}`, status: 'success', url: res.prUrl, timestamp: ts() });
+        if (eventId !== null) await updateEvent(eventId, { status: 'healed', root_cause: `Reverted to last green build: ${res.label}`, fix_steps: [res.label], confidence: res.verified ? 90 : 70, recovery_time_ms: Date.now() - healingStartRef.current });
+        onEventUpdated?.();
+        track(r => withOutcome(r, 'healed', `Opened a revert PR (${res.label})${res.verified ? ' — CI passed on it' : ''}`));
+        setSystemStatus('healthy');
+        onHealingComplete?.(project.id, confidenceToLevel(res.verified ? 90 : 70, true));
+        endRun();
+        return true;
+      }
+      if (res.kind === 'rejected') {
+        add({ type: 'decision', message: 'HEALING_CANCELLED :: operator_rejected_low_confidence_fix', timestamp: ts() });
+        if (eventId !== null) await updateEvent(eventId, { status: 'failed', root_cause: res.analysis || 'operator_rejected_low_confidence_fix', confidence: res.confidence });
+        onEventUpdated?.();
+        setSystemStatus('stopped');
+        onHealingComplete?.(project.id, 'HIGH');
+        endRun();
+        return true;
+      }
+      if (res.kind === 'none') add({ type: 'info', message: `LADDER_EXHAUSTED :: ${res.reason}`, timestamp: ts() });
+      return false;
+    };
+    /** Regenerate the lockfile in CI after a fix changed declared dependencies. */
+    const refreshLockfile = async (
+      platform: Platform, fixBranchName: string, files: Array<{ path: string; content: string }>,
+      commit: (path: string, content: string) => Promise<boolean>,
+    ) => {
+      if (!files.some(f => LOCKFILES.test(f.path))) return; // no lockfile committed — nothing to keep in sync
+      add({ type: 'attempt', message: 'LOCKFILE_REFRESH :: dependencies changed — regenerating the lockfile in CI', timestamp: ts() });
+      const res = await runAutofixJob(strategyCtx(platform, [], fixBranchName), fixBranchName, files, 'lockfile');
+      const lock = res.changed.filter(c => LOCKFILES.test(c.path));
+      if (res.status !== 'ok' || lock.length === 0) {
+        add({ type: 'info', message: `LOCKFILE_REFRESH :: ${res.note ?? res.status} — run your package manager's install and commit the lockfile before merging`, timestamp: ts() });
+        return;
+      }
+      track(r => withExtraFixes(r, lock.map(c => ({ ...c, explanation: `Regenerated by ${res.tools.join(', ')} to match the updated package.json` })), files, 'lockfile'));
+      for (const c of lock) {
+        const ok = await commit(c.path, c.content);
+        track(r => withFixStatus(r, c.path, ok ? 'committed' : 'failed'));
+        add({ type: 'result', message: ok ? `fix_committed :: lockfile path=${c.path}` : `commit_failed :: path=${c.path}`, status: ok ? 'success' : 'failure', timestamp: ts() });
+      }
+    };
+
     const isGitLab = project.platform === 'gitlab';
     const effectivePat = isGitLab ? gitlabPat : githubPat;
     const platformLabel = isGitLab ? 'gitlab.com' : 'github.com';
@@ -215,7 +306,10 @@ export function useHealingProcess({
         if (isGitLab) {
           add({ type: 'info', message: 'fetching_pipelines :: status=failed', timestamp: ts() });
           setActiveNode('code-push');
-          const failedPipeline = await getLatestFailedPipeline(effectivePat, owner, repoName);
+          // The newest pipeline on the repo's own branch, if it is red. (A failure on some other
+          // ref must not be "fixed" with this branch's files.)
+          const newestPipeline = await getNewestPipelineOnRef(effectivePat, owner, repoName, branch);
+          const failedPipeline = newestPipeline && ['failed', 'canceled'].includes(newestPipeline.status) ? newestPipeline : null;
           await delay(400); if (cancelled()) return;
 
           if (!failedPipeline) {
@@ -264,161 +358,93 @@ export function useHealingProcess({
           let aiAnalysis = '';
           let aiRankedAlternatives: Array<{ description: string; confidence: number; risk: string }> = [];
           let aiSources: Array<{ title: string; url: string }> = [];
-
-          if (aiKey) {
-            add({ type: 'attempt', message: `#2 :: strategy=ai_analysis model=${aiModel}`, timestamp: ts() });
-            setActiveNode('fix-engine');
-
-            // Fetch logs for all failed jobs so AI has real error output
-            const allGlJobLogs = await Promise.all(
-              failedJobs.slice(0, 3).map(async j => {
-                if (!j.id) return '';
-                const raw = await getGitlabJobLogs(effectivePat, owner, repoName, j.id).catch(() => '');
-                return `\nJob "${j.name}" logs:\n${chunkLogs(raw)}`;
-              }),
-            );
-
-            const allFailedStepNames = failedJobs.map(j => j.name);
-            const glMultiDiag = categorizeAllErrors(allGlJobLogs.join('\n'), allFailedStepNames);
-            const glDiagnosis = glMultiDiag.primary;
-            const glAllCategories = glMultiDiag.all.map(d => d.category);
-            const glClusters = clusterRootCauses(glAllCategories);
-            const categoryLabel = glMultiDiag.all.length > 1
-              ? `${glDiagnosis.category} (+${glMultiDiag.all.length - 1} more: ${glMultiDiag.all.slice(1).map(d => d.category).join(', ')})`
-              : glDiagnosis.category;
-            track(r => ({ ...r, categories: glAllCategories }));
-            add({ type: 'info', message: `ERROR_DIAGNOSED :: categories=[${categoryLabel}] :: ${glDiagnosis.description}`, timestamp: ts() });
-            if (glClusters.some(c => c.categories.length > 1)) {
-              add({ type: 'info', message: `ROOT_CAUSE_CLUSTER :: ${glClusters.filter(c => c.categories.length > 1).map(c => `${c.rootCause}=[${c.categories.join('+')}]`).join(' | ')}`, timestamp: ts() });
-            }
-
-            // Fetch files for ALL matched categories (universal set + every category's relevant files)
-            const glContext = await buildGitlabContext(effectivePat, owner, repoName, branch, ciFiles, glMultiDiag.all, allGlJobLogs.join('\n'));
-            glContextFiles = glContext.allFiles;
-            if (glContext.additionalFiles.length > 0) {
-              add({ type: 'info', message: `CONTEXT_EXPANDED :: fetched=[${glContext.additionalFiles.map(f => f.path).join(', ')}]`, timestamp: ts() });
-            }
-
-            // Fingerprint the repo tech stack from fetched files
-            const glFingerprint = detectFingerprint(glContext.allFiles);
-            add({ type: 'info', message: `REPO_FINGERPRINT :: ${glFingerprint.summary}`, timestamp: ts() });
-
-            const errorContext = sanitizeForAI([
-              `Repository stack: ${glFingerprint.summary}`,
-              `Languages: [${glFingerprint.languages.join(', ')}] Frameworks: [${glFingerprint.frameworks.join(', ')}]`,
-              `Failed pipeline: id=${failedPipeline.id} (${failedPipeline.web_url})`,
-              `Ref: ${failedPipeline.ref} SHA: ${shortSha}`,
-              `Failed jobs: ${failedJobs.map(j => j.name).join(', ') || 'none'}`,
-              ...allGlJobLogs.filter(Boolean),
-            ].join('\n'));
-
-            if (geminiKey) {
-              const embedding = await getEmbedding(geminiKey, errorContext);
-              if (embedding.length > 0) {
-                const similar = findSimilarFailure(embedding);
-                if (similar) {
-                  add({
-                    type: 'info',
-                    message: `MEMORY_MATCH :: similar_failure_found ${timeAgoMs(similar.record.timestamp)} (${Math.round(similar.similarity * 100)}% match) — ${similar.record.fixes[0]?.explanation ?? 'see past fix'}`,
-                    timestamp: ts(),
-                  });
-                }
-              }
-            }
-
-            // Rule-based fixes first — fire fixers for ALL detected categories in one pass
-            const glRuleFixes = applyRuleBasedFixes(glAllCategories, allGlJobLogs.join('\n'), glContext.allFiles);
-            if (glRuleFixes.length > 0) {
-              aiConfidence = computeRuleConfidence(glAllCategories, glRuleFixes.length);
-              aiAnalysis = `[${glAllCategories.join('+')}] ${glRuleFixes.map(f => f.explanation).join('; ')}`.substring(0, 500);
-              add({ type: 'result', message: `RULE_BASED_FIX :: matched=${glRuleFixes.length} patterns categories=[${glAllCategories.slice(0, 3).join(', ')}] confidence=${aiConfidence}%`, status: 'success', timestamp: ts() });
-              const glRuleConfTier = aiConfidence >= 90 ? 'HIGH' : aiConfidence >= 75 ? 'MEDIUM' : 'LOW';
-              add({ type: 'info', message: `CONFIDENCE_TIER :: ${glRuleConfTier} (${aiConfidence}%) — deterministic_rule_match — auto_applying`, timestamp: ts() });
-              const glConsistency = crossFileConsistencyCheck(glRuleFixes);
-              if (!glConsistency.consistent) {
-                for (const w of glConsistency.warnings) add({ type: 'info', message: `CONSISTENCY_WARNING :: ${w}`, timestamp: ts() });
-              }
-              const glAltStrategies = getAlternativeStrategies(glAllCategories);
-              if (glAltStrategies.length > 0 && aiConfidence < 90) {
-                aiRankedAlternatives = glAltStrategies.slice(0, 3).map(s => ({ description: s.description, confidence: s.confidence, risk: s.risk }));
-                add({ type: 'info', message: `RANKED_ALTERNATIVES :: ${aiRankedAlternatives.map(a => `"${a.description.substring(0, 40)}" conf=${a.confidence}% risk=${a.risk}`).join(' | ')}`, timestamp: ts() });
-              }
-              glFixes = glRuleFixes;
-              track(r => ({ ...withFixes(r, glRuleFixes, glContext.allFiles, 'rule'), engine: 'rules', confidence: aiConfidence }));
+          let fixStrategy: StrategyId = 'rules';
+          let needsLockfileRefresh = false;
+          const glRuns: FailingRun[] = [{ id: failedPipeline.id, name: `pipeline #${failedPipeline.id}`, headSha: failedPipeline.sha }];
+          escalation = async () => {
+            if (fixStrategy === 'revert') return;
+            escalation = undefined; // once per run
+            add({ type: 'attempt', message: 'ESCALATE :: fix branch still red after the deep pass — reverting to the last green build', timestamp: ts() });
+            markStrategy('revert', 'active');
+            const rev = await revertToLastGreen(strategyCtx('gitlab', glRuns, branch));
+            if (rev.status === 'reverted' && rev.prUrl) {
+              markStrategy('revert', 'done', `${rev.label}${rev.verified ? ' — CI green' : ''}`);
+              add({ type: 'result', message: `REVERT_MR :: ${rev.label} — merge this instead of the fix MR`, status: 'success', url: rev.prUrl, timestamp: ts() });
             } else {
-              // Fall through to AI — pass ALL matched diagnoses so AI covers every root cause
-              let result = gcloudKey ? await analyzeWithGrounding(gcloudKey, errorContext, glContext.allFiles) : null;
-              if (!result || result.fixes.length === 0) {
-                if (groqKey) result = await analyzeAndFixWithGroq(groqKey, errorContext, glContext.allFiles, glMultiDiag.all);
-              }
-              if (!result || result.fixes.length === 0) {
-                if (geminiKey) result = await analyzeAndFixWithGemini(geminiKey, errorContext, glContext.allFiles, glDiagnosis);  // gemini still uses primary only
-              }
-              await delay(300); if (cancelled()) return;
+              markStrategy('revert', 'failed', rev.note ?? rev.status);
+            }
+          };
 
-              if (result && result.fixes.length > 0) {
-                aiConfidence = result.confidence;
-                aiAnalysis = result.analysis;
-                aiRankedAlternatives = result.ranked_alternatives ?? [];
-                const short = result.analysis.length > 90 ? result.analysis.substring(0, 90) + '…' : result.analysis;
-                add({
-                  type: 'result',
-                  message: `ai_analysis_complete :: confidence=${aiConfidence}% :: ${short}`,
-                  status: 'success',
-                  timestamp: ts(),
-                });
-                // Confidence tier label — gives operators a clear signal
-                const glConfTier = aiConfidence >= 80 ? 'HIGH' : aiConfidence >= 65 ? 'MEDIUM' : 'LOW';
-                const glConfAction = aiConfidence >= 80 ? 'auto_applying' : aiConfidence >= 65 ? 'proceeding_above_threshold' : 'requires_approval';
-                add({ type: 'info', message: `CONFIDENCE_TIER :: ${glConfTier} (${aiConfidence}%) — ${glConfAction}`, timestamp: ts() });
-                if (aiRankedAlternatives.length > 0) {
-                  add({
-                    type: 'info',
-                    message: `RANKED_ALTERNATIVES :: ${aiRankedAlternatives.map(a => `"${a.description.substring(0, 40)}…" conf=${a.confidence}% risk=${a.risk}`).join(' | ')}`,
-                    timestamp: ts(),
-                  });
-                }
-                aiSources = (result as { sources?: Array<{ title: string; url: string }> }).sources ?? [];
-                if (aiSources.length > 0) {
-                  add({
-                    type: 'info',
-                    message: `GROUNDING_SOURCES :: ${aiSources.slice(0, 3).map(s => s.title.substring(0, 45)).join(' | ')}`,
-                    timestamp: ts(),
-                  });
-                }
-                // Keep ALL AI fixes — commitFile handles create vs update
-                glFixes = result.fixes.map(f => withTargetSha(f, glContext.allFiles));
-                track(r => ({ ...withFixes(r, glFixes, glContext.allFiles, 'ai'), engine: 'ai', confidence: aiConfidence }));
+          add({ type: 'attempt', message: `#2 :: strategy=healing_ladder ai=${aiKey ? aiModel : 'none'}`, timestamp: ts() });
+          setActiveNode('fix-engine');
 
-                // Confidence gate — pause and request user approval if AI is uncertain
-                if (aiConfidence < APPROVAL_THRESHOLD) {
-                  add({ type: 'info', message: `LOW_CONFIDENCE :: score=${aiConfidence}% threshold=${APPROVAL_THRESHOLD}% :: awaiting_operator_approval`, timestamp: ts() });
-                  setSystemStatus('idle');
-                  const approved = await waitForApproval({
-                    confidence: aiConfidence,
-                    analysis: result.analysis,
-                    fixes: result.fixes.map(f => ({ path: f.path, explanation: f.explanation })),
-                    alternatives: aiRankedAlternatives,
-                  });
-                  if (cancelled()) return;
-                  if (!approved) {
-                    add({ type: 'decision', message: 'HEALING_CANCELLED :: operator_rejected_low_confidence_fix', timestamp: ts() });
-                    if (glEvent) await updateEvent(glEvent.id, { status: 'failed', root_cause: aiAnalysis || 'operator_rejected_low_confidence_fix', confidence: aiConfidence });
-                    onEventUpdated?.();
-                    setSystemStatus('stopped');
-                    onHealingComplete?.(project.id, 'HIGH');
-                    endRun();
-                    return;
-                  }
-                  setSystemStatus('healing');
-                  add({ type: 'result', message: `APPROVAL_GRANTED :: proceeding_with_confidence=${aiConfidence}%`, status: 'success', timestamp: ts() });
-                }
-              } else {
-                add({ type: 'result', message: `ai_analysis_failed :: reason=no_fixes_generated`, status: 'failure', timestamp: ts() });
-              }
-            } // end AI fallback block
-            await delay(300); if (cancelled()) return;
+          // Logs for all failed jobs — the rules, the flaky check and the AI all need them
+          const allGlJobLogs = await Promise.all(
+            failedJobs.slice(0, 3).map(async j => {
+              if (!j.id) return '';
+              const raw = await getGitlabJobLogs(effectivePat, owner, repoName, j.id).catch(() => '');
+              return `\nJob "${j.name}" logs:\n${chunkLogs(raw)}`;
+            }),
+          );
+          const glLogs = allGlJobLogs.join('\n');
+          const glMultiDiag = categorizeAllErrors(glLogs, failedJobs.map(j => j.name));
+          const glDiagnosis = glMultiDiag.primary;
+          const glAllCategories = glMultiDiag.all.map(d => d.category);
+          const glClusters = clusterRootCauses(glAllCategories);
+          const categoryLabel = glMultiDiag.all.length > 1
+            ? `${glDiagnosis.category} (+${glMultiDiag.all.length - 1} more: ${glMultiDiag.all.slice(1).map(d => d.category).join(', ')})`
+            : glDiagnosis.category;
+          track(r => ({ ...r, categories: glAllCategories }));
+          add({ type: 'info', message: `ERROR_DIAGNOSED :: categories=[${categoryLabel}] :: ${glDiagnosis.description}`, timestamp: ts() });
+          if (glClusters.some(c => c.categories.length > 1)) {
+            add({ type: 'info', message: `ROOT_CAUSE_CLUSTER :: ${glClusters.filter(c => c.categories.length > 1).map(c => `${c.rootCause}=[${c.categories.join('+')}]`).join(' | ')}`, timestamp: ts() });
           }
+
+          // Files for ALL matched categories + every source file the logs point at
+          const glContext = await buildGitlabContext(effectivePat, owner, repoName, branch, ciFiles, glMultiDiag.all, glLogs);
+          glContextFiles = glContext.allFiles;
+          if (glContext.additionalFiles.length > 0) {
+            add({ type: 'info', message: `CONTEXT_EXPANDED :: fetched=[${glContext.additionalFiles.map(f => f.path).join(', ')}]`, timestamp: ts() });
+          }
+          const glFingerprint = detectFingerprint(glContext.allFiles);
+          add({ type: 'info', message: `REPO_FINGERPRINT :: ${glFingerprint.summary}`, timestamp: ts() });
+
+          const errorContext = sanitizeForAI([
+            `Repository stack: ${glFingerprint.summary}`,
+            `Languages: [${glFingerprint.languages.join(', ')}] Frameworks: [${glFingerprint.frameworks.join(', ')}]`,
+            `Failed pipeline: id=${failedPipeline.id} (${failedPipeline.web_url})`,
+            `Ref: ${failedPipeline.ref} SHA: ${shortSha}`,
+            `Failed jobs: ${failedJobs.map(j => j.name).join(', ') || 'none'}`,
+            ...allGlJobLogs.filter(Boolean),
+          ].join('\n'));
+
+          if (geminiKey) {
+            const embedding = await getEmbedding(geminiKey, errorContext);
+            const similar = embedding.length > 0 ? findSimilarFailure(embedding) : null;
+            if (similar) {
+              add({ type: 'info', message: `MEMORY_MATCH :: similar_failure_found ${timeAgoMs(similar.record.timestamp)} (${Math.round(similar.similarity * 100)}% match) — ${similar.record.fixes[0]?.explanation ?? 'see past fix'}`, timestamp: ts() });
+            }
+          }
+
+          healSignature = errorSignature(glLogs, glAllCategories);
+          const glLadder = await runHealingLadder({
+            ctx: strategyCtx('gitlab', glRuns, branch), repoKey, signature: healSignature,
+            logs: glLogs, categories: glAllCategories, diagnoses: glMultiDiag.all, files: glContext.allFiles,
+            errorContext, keys: { gemini: geminiKey, groq: groqKey, gcloud: gcloudKey },
+            approvalThreshold: APPROVAL_THRESHOLD, requestApproval: approvalGate, onStrategy: markStrategy,
+          });
+          if (await finishLadder(glLadder, glEvent?.id ?? null)) return;
+          if (glLadder.kind === 'fixes') {
+            glFixes = glLadder.fixes;
+            fixStrategy = glLadder.strategy;
+            needsLockfileRefresh = glLadder.needsLockfileRefresh;
+            aiConfidence = glLadder.confidence;
+            aiAnalysis = glLadder.analysis;
+            aiRankedAlternatives = glLadder.alternatives;
+            aiSources = glLadder.sources;
+            track(r => ({ ...withFixes(r, glFixes, glContext.allFiles, SOURCE_FOR[fixStrategy]), engine: fixStrategy, confidence: aiConfidence }));
+          }
+          await delay(300); if (cancelled()) return;
 
           // ── Fix safety validation ────────────────────────────────────────────
           track(r => withPhase(r, 'validate', 'active'));
@@ -509,13 +535,18 @@ export function useHealingProcess({
             return;
           }
 
-          const mrTitle = `fix(aegis): auto-fix CI failure [conf:${aiConfidence}%]`;
+          if (needsLockfileRefresh) {
+            await refreshLockfile('gitlab', glFixBranch, glContextFiles,
+              (path, content) => commitGitlabFile(effectivePat, owner, repoName, path, content, 'fix(aegis): regenerate lockfile', glFixBranch).then(Boolean));
+            if (cancelled()) return;
+          }
+          const mrTitle = `fix(aegis): auto-fix CI failure via ${STRATEGY_NAME[fixStrategy]} [conf:${aiConfidence}%]`;
           add({ type: 'attempt', message: `#${4 + glFixes.length} :: strategy=create_merge_request base=${branch}`, timestamp: ts() });
           const mrBody = [
             `## AEGIS Auto-Fix`,
             ``,
             `> Generated by AEGIS autonomous healing system`,
-            `> AI Confidence: **${aiConfidence}%**`,
+            `> Strategy: **${STRATEGY_NAME[fixStrategy]}** · Confidence: **${aiConfidence}%**`,
             ``,
             `**Failed pipeline:** ${failedPipeline.web_url}`,
             ``,
@@ -533,6 +564,7 @@ export function useHealingProcess({
           if (mrUrl) {
             const recoveryTimeMs = Date.now() - healingStartRef.current;
             add({ type: 'result', message: `MR_CREATED :: confidence=${aiConfidence}% recovery=${Math.round(recoveryTimeMs / 1000)}s`, status: 'success', url: mrUrl, timestamp: ts() });
+            if (healSignature) rememberFix(repoKey, healSignature, glFixes.map(f => ({ path: f.path, before: glContextFiles.find(c => c.path === f.path)?.content ?? null, after: f.content, explanation: f.explanation })), false);
             if (glEvent) await updateEvent(glEvent.id, {
               status: 'healed',
               root_cause: aiAnalysis,
@@ -572,7 +604,7 @@ export function useHealingProcess({
             } else {
               // CI is still red — run a deep second-pass diagnosis on the fix branch
               add({ type: 'result', message: `FIX_UNVERIFIED :: ci_red branch=${glFixBranch} — starting deep_diagnosis_pass`, status: 'failure', timestamp: ts() });
-              if (aiKey) {
+              {
                 try {
                   await delay(6_000); if (cancelled()) return;
                   add({ type: 'attempt', message: `DEEP_DIAGNOSIS :: fetching fix-branch CI logs for second pass`, timestamp: ts() });
@@ -647,14 +679,17 @@ export function useHealingProcess({
                           add({ type: 'result', message: `FIX_VERIFIED :: ci_green after deep diagnosis pass`, status: 'success', timestamp: ts() });
                         } else if (deepVerify === 'failure') {
                           add({ type: 'result', message: `DEEP_UNVERIFIED :: ci_red after 2 passes — see MR for manual investigation`, status: 'failure', timestamp: ts() });
+                          await escalation?.();
                         } else {
                           add({ type: 'info', message: `DEEP_VERIFY_TIMEOUT :: ci_still_running — monitor MR directly`, timestamp: ts() });
                         }
                       } else {
                         add({ type: 'info', message: `DEEP_FIX :: no_new_commits — all additional fixes blocked by validator or already applied`, timestamp: ts() });
+                        await escalation?.();
                       }
                     } else {
                       add({ type: 'info', message: `DEEP_DIAGNOSIS :: no_additional_fixes_found — remaining failures require manual intervention`, timestamp: ts() });
+                      await escalation?.();
                     }
                   } else {
                     add({ type: 'info', message: `DEEP_DIAGNOSIS :: no_failed_pipeline_on_branch_yet — CI may still be initializing`, timestamp: ts() });
@@ -768,169 +803,95 @@ export function useHealingProcess({
           let aiAnalysis = '';
           let aiRankedAlternatives: Array<{ description: string; confidence: number; risk: string }> = [];
           let aiSources: Array<{ title: string; url: string }> = [];
-
-          if (aiKey) {
-            add({ type: 'attempt', message: `#2 :: strategy=ai_analysis model=${aiModel}`, timestamp: ts() });
-            setActiveNode('fix-engine');
-
-            // Fetch logs across ALL failing workflows (up to 5 jobs total)
-            const allGhJobLogs = await Promise.all(
-              allFailedJobs.slice(0, 5).map(async j => {
-                if (!j.id) return '';
-                const raw = await getJobLogs(effectivePat, owner, repoName, j.id).catch(() => '');
-                return `\nJob "${j.name}" logs:\n${chunkLogs(raw)}`;
-              }),
-            );
-
-            // Detect ALL matching error categories from combined logs + failed step names
-            const allFailedStepNames = allFailedJobs.flatMap(j =>
-              j.steps.filter(s => s.conclusion === 'failure').map(s => s.name),
-            );
-            const ghMultiDiag = categorizeAllErrors(allGhJobLogs.join('\n'), allFailedStepNames);
-            const ghDiagnosis = ghMultiDiag.primary;
-            const ghAllCategories = ghMultiDiag.all.map(d => d.category);
-            const ghClusters = clusterRootCauses(ghAllCategories);
-            const ghCategoryLabel = ghMultiDiag.all.length > 1
-              ? `${ghDiagnosis.category} (+${ghMultiDiag.all.length - 1} more: ${ghMultiDiag.all.slice(1).map(d => d.category).join(', ')})`
-              : ghDiagnosis.category;
-            track(r => ({ ...r, categories: ghAllCategories }));
-            add({ type: 'info', message: `ERROR_DIAGNOSED :: categories=[${ghCategoryLabel}] :: ${ghDiagnosis.description}`, timestamp: ts() });
-            if (ghClusters.some(c => c.categories.length > 1)) {
-              add({ type: 'info', message: `ROOT_CAUSE_CLUSTER :: ${ghClusters.filter(c => c.categories.length > 1).map(c => `${c.rootCause}=[${c.categories.join('+')}]`).join(' | ')}`, timestamp: ts() });
-            }
-
-            // Fetch files for ALL matched categories — universal set + each category's relevant files
-            const ghContext = await buildGithubContext(effectivePat, owner, repoName, branch, workflowFiles, ghMultiDiag.all, allGhJobLogs.join('\n'));
-            ghContextFiles = ghContext.allFiles;
-            if (ghContext.additionalFiles.length > 0) {
-              add({ type: 'info', message: `CONTEXT_EXPANDED :: fetched=[${ghContext.additionalFiles.map(f => f.path).join(', ')}]`, timestamp: ts() });
-            }
-
-            // Fingerprint the repo tech stack from fetched files
-            const ghFingerprint = detectFingerprint(ghContext.allFiles);
-            add({ type: 'info', message: `REPO_FINGERPRINT :: ${ghFingerprint.summary}`, timestamp: ts() });
-
-            const errorContext = sanitizeForAI([
-              `Repository stack: ${ghFingerprint.summary}`,
-              `Languages: [${ghFingerprint.languages.join(', ')}] Frameworks: [${ghFingerprint.frameworks.join(', ')}]`,
-              `Failing workflows: ${allFailedRuns.map(r => `"${r.name}"`).join(', ')}`,
-              `Commit: ${shortSha} — "${failedRun.head_commit?.message ?? ''}"`,
-              `Failed jobs: ${allFailedJobs.map(j => j.name).join(', ') || 'none'}`,
-              `Failed steps: ${allFailedStepNames.join(', ') || 'none'}`,
-              ...allGhJobLogs.filter(Boolean),
-            ].join('\n'));
-
-            if (geminiKey) {
-              const embedding = await getEmbedding(geminiKey, errorContext);
-              if (embedding.length > 0) {
-                const similar = findSimilarFailure(embedding);
-                if (similar) {
-                  add({
-                    type: 'info',
-                    message: `MEMORY_MATCH :: similar_failure_found ${timeAgoMs(similar.record.timestamp)} (${Math.round(similar.similarity * 100)}% match) — ${similar.record.fixes[0]?.explanation ?? 'see past fix'}`,
-                    timestamp: ts(),
-                  });
-                }
-              }
-            }
-
-            // Rule-based fixes — fire fixers for ALL detected categories simultaneously
-            const ghRuleFixes = applyRuleBasedFixes(ghAllCategories, allGhJobLogs.join('\n'), ghContext.allFiles);
-            // Skip generic rule-based fixes when all categories are unknown — the rules
-            // would apply content-based heuristics with no actual error signal to guide them.
-            // Fall through to AI so it can inspect the workflow files directly.
-            const ghAllUnknown = ghAllCategories.every(c => c === 'unknown');
-            if (ghRuleFixes.length > 0 && !ghAllUnknown) {
-              aiConfidence = computeRuleConfidence(ghAllCategories, ghRuleFixes.length);
-              aiAnalysis = `[${ghAllCategories.join('+')}] ${ghRuleFixes.map(f => f.explanation).join('; ')}`.substring(0, 500);
-              add({ type: 'result', message: `RULE_BASED_FIX :: matched=${ghRuleFixes.length} patterns categories=[${ghAllCategories.slice(0, 3).join(', ')}] confidence=${aiConfidence}%`, status: 'success', timestamp: ts() });
-              const ghRuleConfTier = aiConfidence >= 90 ? 'HIGH' : aiConfidence >= 75 ? 'MEDIUM' : 'LOW';
-              add({ type: 'info', message: `CONFIDENCE_TIER :: ${ghRuleConfTier} (${aiConfidence}%) — deterministic_rule_match — auto_applying`, timestamp: ts() });
-              const ghConsistency = crossFileConsistencyCheck([...ghRuleFixes, ...workflowFiles]);
-              if (!ghConsistency.consistent) {
-                for (const w of ghConsistency.warnings) add({ type: 'info', message: `CONSISTENCY_WARNING :: ${w}`, timestamp: ts() });
-              }
-              const ghAltStrategies = getAlternativeStrategies(ghAllCategories);
-              if (ghAltStrategies.length > 0 && aiConfidence < 90) {
-                aiRankedAlternatives = ghAltStrategies.slice(0, 3).map(s => ({ description: s.description, confidence: s.confidence, risk: s.risk }));
-                add({ type: 'info', message: `RANKED_ALTERNATIVES :: ${aiRankedAlternatives.map(a => `"${a.description.substring(0, 40)}" conf=${a.confidence}% risk=${a.risk}`).join(' | ')}`, timestamp: ts() });
-              }
-              ghFixes = ghRuleFixes.map(f => withTargetSha(f, ghContext.allFiles));
-              track(r => ({ ...withFixes(r, ghFixes, ghContext.allFiles, 'rule'), engine: 'rules', confidence: aiConfidence }));
+          let fixStrategy: StrategyId = 'rules';
+          let needsLockfileRefresh = false;
+          const ghRuns: FailingRun[] = allFailedRuns.map(r => ({ id: r.id, name: r.name, workflowId: r.workflow_id, headSha: r.head_sha }));
+          escalation = async () => {
+            if (fixStrategy === 'revert') return;
+            escalation = undefined; // once per run
+            add({ type: 'attempt', message: 'ESCALATE :: fix branch still red after the deep pass — reverting to the last green build', timestamp: ts() });
+            markStrategy('revert', 'active');
+            const rev = await revertToLastGreen(strategyCtx('github', ghRuns, branch));
+            if (rev.status === 'reverted' && rev.prUrl) {
+              markStrategy('revert', 'done', `${rev.label}${rev.verified ? ' — CI green' : ''}`);
+              add({ type: 'result', message: `REVERT_PR :: ${rev.label} — merge this instead of the fix PR`, status: 'success', url: rev.prUrl, timestamp: ts() });
             } else {
-              // Fall through to AI — pass ALL matched diagnoses so AI addresses every root cause
-              let result = gcloudKey ? await analyzeWithGrounding(gcloudKey, errorContext, ghContext.allFiles) : null;
-              if (!result || result.fixes.length === 0) {
-                if (groqKey) result = await analyzeAndFixWithGroq(groqKey, errorContext, ghContext.allFiles, ghMultiDiag.all);
-              }
-              if (!result || result.fixes.length === 0) {
-                if (geminiKey) result = await analyzeAndFixWithGemini(geminiKey, errorContext, ghContext.allFiles, ghDiagnosis);  // gemini still uses primary only
-              }
-              await delay(300); if (cancelled()) return;
+              markStrategy('revert', 'failed', rev.note ?? rev.status);
+            }
+          };
 
-              if (result && result.fixes.length > 0) {
-                aiConfidence = result.confidence;
-                aiAnalysis = result.analysis;
-                aiRankedAlternatives = result.ranked_alternatives ?? [];
-                const short = result.analysis.length > 90 ? result.analysis.substring(0, 90) + '…' : result.analysis;
-                add({
-                  type: 'result',
-                  message: `ai_analysis_complete :: confidence=${aiConfidence}% :: ${short}`,
-                  status: 'success',
-                  timestamp: ts(),
-                });
-                // Confidence tier label
-                const ghConfTier = aiConfidence >= 80 ? 'HIGH' : aiConfidence >= 65 ? 'MEDIUM' : 'LOW';
-                const ghConfAction = aiConfidence >= 80 ? 'auto_applying' : aiConfidence >= 65 ? 'proceeding_above_threshold' : 'requires_approval';
-                add({ type: 'info', message: `CONFIDENCE_TIER :: ${ghConfTier} (${aiConfidence}%) — ${ghConfAction}`, timestamp: ts() });
-                if (aiRankedAlternatives.length > 0) {
-                  add({
-                    type: 'info',
-                    message: `RANKED_ALTERNATIVES :: ${aiRankedAlternatives.map(a => `"${a.description.substring(0, 40)}…" conf=${a.confidence}% risk=${a.risk}`).join(' | ')}`,
-                    timestamp: ts(),
-                  });
-                }
-                aiSources = (result as { sources?: Array<{ title: string; url: string }> }).sources ?? [];
-                if (aiSources.length > 0) {
-                  add({
-                    type: 'info',
-                    message: `GROUNDING_SOURCES :: ${aiSources.slice(0, 3).map(s => s.title.substring(0, 45)).join(' | ')}`,
-                    timestamp: ts(),
-                  });
-                }
-                // Map AI fixes to file SHAs — sha:'' means create new file
-                ghFixes = result.fixes.map(f => withTargetSha(f, ghContext.allFiles));
-                track(r => ({ ...withFixes(r, ghFixes, ghContext.allFiles, 'ai'), engine: 'ai', confidence: aiConfidence }));
+          add({ type: 'attempt', message: `#2 :: strategy=healing_ladder ai=${aiKey ? aiModel : 'none'}`, timestamp: ts() });
+          setActiveNode('fix-engine');
 
-                // Confidence gate
-                if (aiConfidence < APPROVAL_THRESHOLD) {
-                  add({ type: 'info', message: `LOW_CONFIDENCE :: score=${aiConfidence}% threshold=${APPROVAL_THRESHOLD}% :: awaiting_operator_approval`, timestamp: ts() });
-                  setSystemStatus('idle');
-                  const approved = await waitForApproval({
-                    confidence: aiConfidence,
-                    analysis: result.analysis,
-                    fixes: result.fixes.map(f => ({ path: f.path, explanation: f.explanation })),
-                    alternatives: aiRankedAlternatives,
-                  });
-                  if (cancelled()) return;
-                  if (!approved) {
-                    add({ type: 'decision', message: 'HEALING_CANCELLED :: operator_rejected_low_confidence_fix', timestamp: ts() });
-                    if (ghEvent) await updateEvent(ghEvent.id, { status: 'failed', root_cause: 'operator_rejected_low_confidence_fix', confidence: aiConfidence });
-                    onEventUpdated?.();
-                    setSystemStatus('stopped');
-                    onHealingComplete?.(project.id, 'HIGH');
-                    endRun();
-                    return;
-                  }
-                  setSystemStatus('healing');
-                  add({ type: 'result', message: `APPROVAL_GRANTED :: proceeding_with_confidence=${aiConfidence}%`, status: 'success', timestamp: ts() });
-                }
-              } else {
-                add({ type: 'result', message: `ai_analysis_failed :: reason=no_fixes_generated`, status: 'failure', timestamp: ts() });
-              }
-            } // end AI fallback block
-            await delay(300); if (cancelled()) return;
+          // Logs across ALL failing workflows (up to 5 jobs) — needed by every strategy
+          const allGhJobLogs = await Promise.all(
+            allFailedJobs.slice(0, 5).map(async j => {
+              if (!j.id) return '';
+              const raw = await getJobLogs(effectivePat, owner, repoName, j.id).catch(() => '');
+              return `\nJob "${j.name}" logs:\n${chunkLogs(raw)}`;
+            }),
+          );
+          const ghLogs = allGhJobLogs.join('\n');
+          const allFailedStepNames = allFailedJobs.flatMap(j => j.steps.filter(s => s.conclusion === 'failure').map(s => s.name));
+          const ghMultiDiag = categorizeAllErrors(ghLogs, allFailedStepNames);
+          const ghDiagnosis = ghMultiDiag.primary;
+          const ghAllCategories = ghMultiDiag.all.map(d => d.category);
+          const ghClusters = clusterRootCauses(ghAllCategories);
+          const ghCategoryLabel = ghMultiDiag.all.length > 1
+            ? `${ghDiagnosis.category} (+${ghMultiDiag.all.length - 1} more: ${ghMultiDiag.all.slice(1).map(d => d.category).join(', ')})`
+            : ghDiagnosis.category;
+          track(r => ({ ...r, categories: ghAllCategories }));
+          add({ type: 'info', message: `ERROR_DIAGNOSED :: categories=[${ghCategoryLabel}] :: ${ghDiagnosis.description}`, timestamp: ts() });
+          if (ghClusters.some(c => c.categories.length > 1)) {
+            add({ type: 'info', message: `ROOT_CAUSE_CLUSTER :: ${ghClusters.filter(c => c.categories.length > 1).map(c => `${c.rootCause}=[${c.categories.join('+')}]`).join(' | ')}`, timestamp: ts() });
           }
+
+          const ghContext = await buildGithubContext(effectivePat, owner, repoName, branch, workflowFiles, ghMultiDiag.all, ghLogs);
+          ghContextFiles = ghContext.allFiles;
+          if (ghContext.additionalFiles.length > 0) {
+            add({ type: 'info', message: `CONTEXT_EXPANDED :: fetched=[${ghContext.additionalFiles.map(f => f.path).join(', ')}]`, timestamp: ts() });
+          }
+          const ghFingerprint = detectFingerprint(ghContext.allFiles);
+          add({ type: 'info', message: `REPO_FINGERPRINT :: ${ghFingerprint.summary}`, timestamp: ts() });
+
+          const errorContext = sanitizeForAI([
+            `Repository stack: ${ghFingerprint.summary}`,
+            `Languages: [${ghFingerprint.languages.join(', ')}] Frameworks: [${ghFingerprint.frameworks.join(', ')}]`,
+            `Failing workflows: ${allFailedRuns.map(r => `"${r.name}"`).join(', ')}`,
+            `Commit: ${shortSha} — "${failedRun.head_commit?.message ?? ''}"`,
+            `Failed jobs: ${allFailedJobs.map(j => j.name).join(', ') || 'none'}`,
+            `Failed steps: ${allFailedStepNames.join(', ') || 'none'}`,
+            ...allGhJobLogs.filter(Boolean),
+          ].join('\n'));
+
+          if (geminiKey) {
+            const embedding = await getEmbedding(geminiKey, errorContext);
+            const similar = embedding.length > 0 ? findSimilarFailure(embedding) : null;
+            if (similar) {
+              add({ type: 'info', message: `MEMORY_MATCH :: similar_failure_found ${timeAgoMs(similar.record.timestamp)} (${Math.round(similar.similarity * 100)}% match) — ${similar.record.fixes[0]?.explanation ?? 'see past fix'}`, timestamp: ts() });
+            }
+          }
+
+          healSignature = errorSignature(ghLogs, ghAllCategories);
+          const ghLadder = await runHealingLadder({
+            ctx: strategyCtx('github', ghRuns, branch), repoKey, signature: healSignature,
+            logs: ghLogs, categories: ghAllCategories, diagnoses: ghMultiDiag.all, files: ghContext.allFiles,
+            staticFixes: staticFixes.map(f => withTargetSha(f, ghContext.allFiles)),
+            errorContext, keys: { gemini: geminiKey, groq: groqKey, gcloud: gcloudKey },
+            approvalThreshold: APPROVAL_THRESHOLD, requestApproval: approvalGate, onStrategy: markStrategy,
+          });
+          if (await finishLadder(ghLadder, ghEvent?.id ?? null)) return;
+          if (ghLadder.kind === 'fixes') {
+            ghFixes = ghLadder.fixes.map(f => ({ ...f, sha: f.sha ?? '' }));
+            fixStrategy = ghLadder.strategy;
+            needsLockfileRefresh = ghLadder.needsLockfileRefresh;
+            aiConfidence = ghLadder.confidence;
+            aiAnalysis = ghLadder.analysis;
+            aiRankedAlternatives = ghLadder.alternatives;
+            aiSources = ghLadder.sources;
+            track(r => ({ ...withFixes(r, ghFixes, ghContext.allFiles, SOURCE_FOR[fixStrategy]), engine: fixStrategy, confidence: aiConfidence }));
+          }
+          await delay(300); if (cancelled()) return;
 
           // ── Merge static YAML analysis fixes ────────────────────────────────
           // staticFixes were computed before log-based diagnosis by inspecting YAML
@@ -1112,13 +1073,18 @@ export function useHealingProcess({
             return;
           }
 
-          const prTitle = `fix(aegis): auto-fix CI failure [conf:${aiConfidence}%]`;
+          if (needsLockfileRefresh) {
+            await refreshLockfile('github', fixBranch, ghContextFiles,
+              (path, content) => commitFile(effectivePat, owner, repoName, path, content, '', 'fix(aegis): regenerate lockfile', fixBranch).then(Boolean));
+            if (cancelled()) return;
+          }
+          const prTitle = `fix(aegis): auto-fix CI failure via ${STRATEGY_NAME[fixStrategy]} [conf:${aiConfidence}%]`;
           add({ type: 'attempt', message: `#${4 + ghFixes.length} :: strategy=create_pull_request base=${branch}`, timestamp: ts() });
           const prBody = [
             `## AEGIS Auto-Fix`,
             ``,
             `> Generated by AEGIS autonomous healing system`,
-            `> AI Confidence: **${aiConfidence}%**`,
+            `> Strategy: **${STRATEGY_NAME[fixStrategy]}** · Confidence: **${aiConfidence}%**`,
             ``,
             `**Failed run:** ${failedRun.html_url}`,
             ``,
@@ -1136,6 +1102,7 @@ export function useHealingProcess({
           if (prUrl) {
             const recoveryTimeMs = Date.now() - healingStartRef.current;
             add({ type: 'result', message: `PR_CREATED :: confidence=${aiConfidence}% recovery=${Math.round(recoveryTimeMs / 1000)}s`, status: 'success', url: prUrl, timestamp: ts() });
+            if (healSignature) rememberFix(repoKey, healSignature, ghFixes.map(f => ({ path: f.path, before: ghContextFiles.find(c => c.path === f.path)?.content ?? null, after: f.content, explanation: f.explanation })), false);
             if (ghEvent) await updateEvent(ghEvent.id, {
               status: 'healed',
               root_cause: aiAnalysis,
@@ -1179,7 +1146,7 @@ export function useHealingProcess({
               let deepDiagResult: 'success' | 'failure' | 'timeout' = ghCiVerify;
               if (ghCiVerify === 'timeout') {
                 add({ type: 'info', message: `VERIFY_TIMEOUT :: ci_still_running after_60s — waiting_45s_for_jobs_to_complete`, timestamp: ts() });
-                if (aiKey) {
+                {
                   await delay(45_000); if (cancelled()) return;
                   deepDiagResult = await waitForBranchCI(effectivePat, owner, repoName, fixBranch, 45_000, 15_000);
                   if (cancelled()) return;
@@ -1191,16 +1158,13 @@ export function useHealingProcess({
                     deepDiagResult = 'success'; // mark as handled so deep diagnosis is skipped
                   }
                   // if 'failure', fall through to deep diagnosis below
-                } else {
-                  add({ type: 'info', message: `VERIFY_TIMEOUT :: ci_still_running after_60s — monitor_PR_directly`, timestamp: ts() });
-                  deepDiagResult = 'success'; // skip deep diagnosis when no AI key
                 }
               }
 
               if (deepDiagResult === 'failure') {
               // CI is still red — run a deep second-pass diagnosis on the fix branch
               add({ type: 'result', message: `FIX_UNVERIFIED :: ci_red branch=${fixBranch} — starting deep_diagnosis_pass`, status: 'failure', timestamp: ts() });
-              if (aiKey) {
+              {
                 try {
                   await delay(6_000); if (cancelled()) return;
                   add({ type: 'attempt', message: `DEEP_DIAGNOSIS :: fetching fix-branch CI logs for second pass`, timestamp: ts() });
@@ -1279,14 +1243,17 @@ export function useHealingProcess({
                           add({ type: 'result', message: `FIX_VERIFIED :: ci_green after deep diagnosis pass`, status: 'success', timestamp: ts() });
                         } else if (deepVerify === 'failure') {
                           add({ type: 'result', message: `DEEP_UNVERIFIED :: ci_red after 2 passes — see PR for manual investigation`, status: 'failure', timestamp: ts() });
+                          await escalation?.();
                         } else {
                           add({ type: 'info', message: `DEEP_VERIFY_TIMEOUT :: ci_still_running — monitor PR directly`, timestamp: ts() });
                         }
                       } else {
                         add({ type: 'info', message: `DEEP_FIX :: no_new_commits — all additional fixes blocked by validator or already applied`, timestamp: ts() });
+                        await escalation?.();
                       }
                     } else {
                       add({ type: 'info', message: `DEEP_DIAGNOSIS :: no_additional_fixes_found — remaining failures require manual intervention`, timestamp: ts() });
+                      await escalation?.();
                     }
                   } else {
                     add({ type: 'info', message: `DEEP_DIAGNOSIS :: no_failed_runs_on_branch_yet — CI may still be initializing`, timestamp: ts() });
@@ -1406,6 +1373,7 @@ export function useHealingProcess({
     showLogs,
     setShowLogs,
     healRepo,
+    isHealing: () => healingRef.current,
     resetHealing,
     pendingApproval,
     approveHealing,

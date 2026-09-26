@@ -65,4 +65,20 @@ export default defineConfig({
 
   // File types to support raw imports. Never add .css, .tsx, or .ts files to this.
   assetsInclude: ['**/*.svg', '**/*.csv'],
+
+  build: {
+    // The one large chunk is the healing engine (~1,000 rules), loaded only when a heal starts.
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      output: {
+        // Stable vendor code in its own long-cached chunks; the healing engine and
+        // secondary views are already split via dynamic import() / React.lazy.
+        manualChunks: {
+          react: ['react', 'react-dom'],
+          motion: ['motion'],
+          icons: ['lucide-react'],
+        },
+      },
+    },
+  },
 })

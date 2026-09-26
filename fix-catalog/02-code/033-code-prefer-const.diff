@@ -1,0 +1,27 @@
+# Aegis fix catalog #033 — ESLint prefer-const
+#
+# Tier:       2 · Source code
+# Category:   lint_failure
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | /home/runner/work/app/app/src/config.ts
+#   |   3:5  error  'port' is never reassigned. Use 'const' instead  prefer-const
+#   | 
+#   | ✖ 1 problem (1 error, 0 warnings)
+#
+# How it is solved:
+#   MODIFY src/config.ts
+#     - Changed let → const for 'port' (ESLint prefer-const) — the variables are never reassigned, so the lint gate rejected them
+#
+# Apply:      git apply 02-code/033-code-prefer-const.diff
+diff --git a/src/config.ts b/src/config.ts
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -1,5 +1,5 @@
+ export function config() {
+   const host = process.env.HOST ?? 'localhost';
+-  let port = Number(process.env.PORT ?? 3000);
++  const port = Number(process.env.PORT ?? 3000);
+   return { host, port };
+ }

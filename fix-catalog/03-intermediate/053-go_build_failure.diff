@@ -1,0 +1,50 @@
+# Aegis fix catalog #053 — Go modules not downloaded / toolchain missing
+#
+# Tier:       3 · Intermediate
+# Category:   go_build_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | go: downloading github.com/gin-gonic/gin v1.9.1
+#   | main.go:4:2: no required module provides package github.com/gin-gonic/gin; to add it:
+#   | 	go get github.com/gin-gonic/gin
+#   | go build failed
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added actions/setup-go@v5 (1.22) — Go detected but no setup step
+#     - built-in module cache (~/go/pkg/mod) reduces download time significantly
+#     - Added Go CI env vars — CGO_ENABLED=0 produces static binaries with no runtime deps
+#     - GOPROXY speeds module downloads
+#     - GOFLAGS=-mod=mod allows automatic go.mod updates
+#     - Added go mod download — without it Go cannot resolve imports on a fresh runner
+#     - go mod verify checks downloaded module checksums against go.sum
+#
+# Apply:      git apply 03-intermediate/053-go_build_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,11 +14,23 @@
+ env:
+   CI: 'true'
+   NODE_ENV: test
++  GOFLAGS: '-mod=mod'
++  CGO_ENABLED: '0'
++  GOPROXY: https://proxy.golang.org,direct
+ jobs:
+   build:
+     runs-on: ubuntu-latest
+     timeout-minutes: 15
+     steps:
+       - uses: actions/checkout@v4
++      - name: Set up Go 1.22
++        uses: actions/setup-go@v5
++        with:
++          go-version: '1.22'
++          cache: true
++      - name: Download Go modules
++        run: |
++          go mod download
++          go mod verify
+       - run: go build ./...
+       - run: go test ./...

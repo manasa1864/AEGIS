@@ -1,0 +1,24 @@
+# Aegis fix catalog #039 — Unused '@ts-expect-error' (TS2578)
+#
+# Tier:       2 · Source code
+# Category:   compilation_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | src/legacy.ts(4,3): error TS2578: Unused '@ts-expect-error' directive.
+#
+# How it is solved:
+#   MODIFY src/legacy.ts
+#     - Removed unused '@ts-expect-error' directives (TS2578) — the error they suppressed no longer exists, and TypeScript fails the build on a directive with nothing to suppress
+#
+# Apply:      git apply 02-code/039-code-unused-ts-expect-error.diff
+diff --git a/src/legacy.ts b/src/legacy.ts
+--- a/src/legacy.ts
++++ b/src/legacy.ts
+@@ -1,6 +1,5 @@
+ import { parse } from './parser';
+ 
+ export function load(raw: string) {
+-  // @ts-expect-error — parse() used to return any
+   return parse(raw);
+ }

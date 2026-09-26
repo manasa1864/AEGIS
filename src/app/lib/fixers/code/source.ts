@@ -553,3 +553,76 @@ export function fixMissingPythonPackage(logs: string, files: Files): RuleFix[] {
     confidence: 85,
   }];
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 11. Compiler "did you mean …?" suggestions — apply the tool's own fix
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Compilers already know the fix for many misspellings and print it. This
+// applies exactly that replacement, at exactly the location they report:
+//   TS2551/TS2552/TS2724  Property/name 'x' … Did you mean 'y'?
+//   Python 3.10+          NameError / AttributeError / ImportError … Did you mean: 'y'?
+//   rustc                 help: a … with a similar name exists: `y`
+
+interface Suggestion { ref: string; line: number; col?: number; bad: string; good: string }
+
+function collectSuggestions(logs: string): Suggestion[] {
+  const out: Suggestion[] = [];
+  const lines = logs.split('\n').map(l => l.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s/, ''));
+
+  for (const l of lines) {
+    // TypeScript (tsc pretty=false and path:line:col forms)
+    const ts = l.match(/([^\s(]+\.[cm]?[jt]sx?)(?:\((\d+),(\d+)\)|:(\d+):(\d+))\s*[-:]\s*error TS(2551|2552|2724|2561): .*?'([\w$]+)'.*Did you mean (?:to write )?'([\w$]+)'\?/);
+    if (ts) out.push({ ref: normalizeRepoPath(ts[1]), line: +(ts[2] ?? ts[4]), col: +(ts[3] ?? ts[5]), bad: ts[7], good: ts[8] });
+  }
+
+  // Python: the error line follows the traceback; its location is the last repo frame before it.
+  for (let i = 0; i < lines.length; i++) {
+    const py = lines[i].match(/^(?:NameError: name|AttributeError: .*has no attribute|ImportError: cannot import name) '(\w+)'.*Did you mean:? '(\w+)'\??/);
+    if (!py) continue;
+    for (let j = i - 1; j >= 0 && j >= i - 40; j--) {
+      const frame = lines[j].match(/File "([^"]+\.py)", line (\d+)/);
+      if (frame && isRepoRelativeSource(normalizeRepoPath(frame[1]))) {
+        out.push({ ref: normalizeRepoPath(frame[1]), line: +frame[2], bad: py[1], good: py[2] });
+        break;
+      }
+    }
+  }
+
+  // rustc: error[E0425/E0412/E0433/E0599…]: … `bad` … / --> path:line:col / … help: … similar name exists: `good`
+  for (let i = 0; i < lines.length; i++) {
+    const err = lines[i].match(/^error\[E\d{4}\]: .*?`([\w:]+)`/);
+    if (!err) continue;
+    let loc: RegExpMatchArray | null = null;
+    for (let j = i + 1; j < Math.min(lines.length, i + 25); j++) {
+      loc ??= lines[j].match(/-->\s+([^\s:]+\.rs):(\d+):(\d+)/);
+      const help = lines[j].match(/help: .*similar name exists(?: in the \w+)?: `([\w:]+)`/);
+      if (help && loc) { out.push({ ref: normalizeRepoPath(loc[1]), line: +loc[2], col: +loc[3], bad: err[1].split('::').pop()!, good: help[1].split('::').pop()! }); break; }
+      if (/^error(\[|:)/.test(lines[j])) break;
+    }
+  }
+  return out;
+}
+
+export function fixCompilerSuggestions(logs: string, files: Files): RuleFix[] {
+  if (!/Did you mean|similar name exists/.test(logs)) return [];
+  const edits = new SourceEdits(files);
+  for (const s of collectSuggestions(logs)) {
+    if (s.bad === s.good) continue;
+    const file = findFile(files, s.ref);
+    if (!file) continue;
+    const lines = edits.lines(file.path)!;
+    const idx = s.line - 1;
+    const line = lines[idx];
+    if (line === undefined || line === REMOVED) continue;
+    const re = new RegExp(`(?<![\\w$])${escapeRe(s.bad)}(?![\\w$])`, 'g');
+    const hits = [...line.matchAll(re)];
+    if (hits.length === 0) continue;
+    // the occurrence at (or nearest to) the reported column
+    const col = (s.col ?? 1) - 1;
+    const hit = hits.reduce((best, h) => (Math.abs(h.index! - col) < Math.abs(best.index! - col) ? h : best));
+    lines[idx] = line.slice(0, hit.index!) + s.good + line.slice(hit.index! + s.bad.length);
+    edits.note(file.path, `${s.bad} → ${s.good} (line ${s.line})`);
+  }
+  return edits.result(notes => `Applied the compiler's own "did you mean" suggestion${notes.length > 1 ? 's' : ''}: ${notes.join(', ')} — the compiler named the correct identifier; only that token at the reported location was changed`, 96);
+}

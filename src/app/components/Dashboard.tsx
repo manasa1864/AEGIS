@@ -1,19 +1,29 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CheckCircle } from 'lucide-react';
 import { BackgroundCanvas } from './BackgroundCanvas';
-import { SettingsModal } from './SettingsModal';
+import { SettingsModal, type AegisSettings } from './SettingsModal';
 import { TopBar } from './TopBar';
 import { RepoListView } from './RepoListView';
 import { HealingDetailView } from './HealingDetailView';
 import { TerminalPanel } from './TerminalPanel';
 import { IntelligenceStream } from './IntelligenceStream';
-import { HistoryView } from './HistoryView';
-import { IntelligenceView } from './IntelligenceView';
+
+// Secondary views are code-split: they load the first time their tab is opened.
+const HistoryView = lazy(() => import('./HistoryView').then(m => ({ default: m.HistoryView })));
+const IntelligenceView = lazy(() => import('./IntelligenceView').then(m => ({ default: m.IntelligenceView })));
+const CICDPage = lazy(() => import('./CICDPage').then(m => ({ default: m.CICDPage })));
+const IssuesPage = lazy(() => import('./IssuesPage').then(m => ({ default: m.IssuesPage })));
+const PullRequestsPage = lazy(() => import('./PullRequestsPage').then(m => ({ default: m.PullRequestsPage })));
+const BranchesPage = lazy(() => import('./BranchesPage').then(m => ({ default: m.BranchesPage })));
+const ReleasesPage = lazy(() => import('./ReleasesPage').then(m => ({ default: m.ReleasesPage })));
+const SecurityPage = lazy(() => import('./SecurityPage').then(m => ({ default: m.SecurityPage })));
+const InsightsPage = lazy(() => import('./InsightsPage').then(m => ({ default: m.InsightsPage })));
+const PushPage = lazy(() => import('./PushPage').then(m => ({ default: m.PushPage })));
 import { useHealingProcess } from '../hooks/useHealingProcess';
 import { Project, View, MetricsData } from '../types';
 import { getRepo, getComprehensiveCI, isFailedConclusion } from '../lib/github';
-import { getRepo as getGitlabRepo, getLatestFailedPipeline } from '../lib/gitlab';
+import { getRepo as getGitlabRepo, getNewestPipelineOnRef, setGitlabHost, gitlabHost } from '../lib/gitlab';
 import { apiGetRepos, apiAddRepo, apiUpdateRepo, apiDeleteRepo, apiGetMetrics, apiCreateEvent, apiGetEvents, apiUpdateEvent } from '../lib/backendApi';
 import { levelToErrorType, type ErrorLevel } from '../lib/errorLevel';
 
@@ -23,9 +33,12 @@ interface DashboardProps {
 
 function detectPlatform(url: string): { platform: 'github' | 'gitlab'; owner: string; repo: string } | null {
   const cleaned = url.replace(/^https?:\/\//, '').replace(/\.git$/, '').trim();
-  if (cleaned.startsWith('gitlab.com/')) {
-    const parts = cleaned.replace('gitlab.com/', '').split('/').filter(Boolean);
-    if (parts.length >= 2) return { platform: 'gitlab', owner: parts[0], repo: parts[1] };
+  const glHost = gitlabHost();
+  for (const host of new Set(['gitlab.com', glHost])) {
+    if (!cleaned.startsWith(`${host}/`)) continue;
+    // GitLab supports nested groups: group/subgroup/project → owner = everything but the last segment
+    const parts = cleaned.slice(host.length + 1).split('/').filter(Boolean);
+    if (parts.length >= 2) return { platform: 'gitlab', owner: parts.slice(0, -1).join('/'), repo: parts[parts.length - 1] };
   }
   const parts = cleaned.replace('github.com/', '').split('/').filter(Boolean);
   if (parts.length >= 2) return { platform: 'github', owner: parts[0], repo: parts[1] };
@@ -150,22 +163,33 @@ function ApprovalModal({ approval, onApprove, onCancel }: {
 // value into the JS bundle, so reading them in a production build would ship
 // the PATs/API keys to every visitor. `import.meta.env.DEV` is statically false
 // in `vite build`, letting the minifier drop the secret strings entirely.
+const realKey = (v: string | undefined) => (v && !/^your_.*_here$/.test(v) ? v : ''); // .env.example placeholders are not keys
 const DEV_KEYS = import.meta.env.DEV
   ? {
-      github: import.meta.env.VITE_GITHUB_PAT ?? '',
-      gitlab: import.meta.env.VITE_GITLAB_PAT ?? '',
-      gemini: import.meta.env.VITE_GEMINI_KEY ?? '',
-      groq: import.meta.env.VITE_GROQ_KEY ?? '',
-      gcloud: import.meta.env.VITE_GCLOUD_KEY ?? '',
+      github: realKey(import.meta.env.VITE_GITHUB_PAT),
+      gitlab: realKey(import.meta.env.VITE_GITLAB_PAT),
+      gemini: realKey(import.meta.env.VITE_GEMINI_KEY),
+      groq: realKey(import.meta.env.VITE_GROQ_KEY),
+      gcloud: realKey(import.meta.env.VITE_GCLOUD_KEY),
     }
   : { github: '', gitlab: '', gemini: '', groq: '', gcloud: '' };
+
+// Non-secret preferences survive reloads; keys stay in sessionStorage (cleared with the tab).
+const readPref = (k: string) => { try { return localStorage.getItem(k) ?? ''; } catch { return ''; } };
+const writePref = (k: string, v: string) => { try { if (v) localStorage.setItem(k, v); else localStorage.removeItem(k); } catch { /* storage blocked */ } };
 
 export function Dashboard({ onLogout }: DashboardProps) {
   const [githubPat, setGithubPat] = useState(() => DEV_KEYS.github || sessionStorage.getItem('aegis_pat') || '');
   const [gitlabPat, setGitlabPat] = useState(() => DEV_KEYS.gitlab || sessionStorage.getItem('aegis_gitlab_pat') || '');
   const [geminiKey, setGeminiKey] = useState(() => DEV_KEYS.gemini || sessionStorage.getItem('aegis_gemini') || '');
   const [groqKey, setGroqKey] = useState(() => DEV_KEYS.groq || sessionStorage.getItem('aegis_groq') || '');
-  const [gcloudKey] = useState(() => DEV_KEYS.gcloud);
+  const [gcloudKey, setGcloudKey] = useState(() => DEV_KEYS.gcloud || sessionStorage.getItem('aegis_gcloud') || '');
+  const [gitlabHostSetting, setGitlabHostSetting] = useState(() => readPref('aegis_gitlab_host'));
+  const [autoHeal, setAutoHeal] = useState(() => readPref('aegis_auto_heal') === '1');
+  // Applied synchronously so the first API calls already go to the right GitLab instance.
+  setGitlabHost(gitlabHostSetting);
+  // Set once the healing hook exists (below); scanCIStatus calls it on a new failure.
+  const autoHealRef = useRef<((projectId: string) => void) | null>(null);
 
   const [view, setView] = useState<View>(() => (sessionStorage.getItem('aegis_view') as View) || 'healing');
   // loadMetrics is declared below — safe to reference here because handleViewChange
@@ -208,9 +232,11 @@ export function Dashboard({ onLogout }: DashboardProps) {
       let errorType: string;
 
       if (project.platform === 'gitlab' && gitlabPat) {
-        const failed = await getLatestFailedPipeline(gitlabPat, project.owner, project.repoName).catch(() => null);
+        // Status of the repo's own branch — a red feature branch must not mark the repo failing
+        const latest = await getNewestPipelineOnRef(gitlabPat, project.owner, project.repoName, project.repo || 'main').catch(() => null);
+        const failed = latest && ['failed', 'canceled'].includes(latest.status) ? latest : null;
         healingStatus = failed ? 'HIGH' : 'NO_ERROR';
-        errorType = failed ? `FAILING: pipeline#${failed.id}` : 'CI_HEALTHY';
+        errorType = failed ? `FAILING: pipeline#${failed.id}` : latest ? 'CI_HEALTHY' : 'PENDING_SCAN';
       } else if (project.platform !== 'gitlab' && githubPat) {
         const checks = await getComprehensiveCI(githubPat, project.owner, project.repoName, project.repo || 'main').catch(() => []);
         const failing = checks.filter(c => isFailedConclusion(c.conclusion));
@@ -238,6 +264,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
           status: 'healing',
         }).catch(() => null);
         if (ev) { ciEventRef.current[project.id] = ev.id; loadMetrics(); bumpHistory(); }
+        autoHealRef.current?.(project.id);
       }
 
       // Failure resolved — update the tracked healing event to 'healed'
@@ -359,7 +386,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   const {
     systemStatus, activeNode, streamEntries, logs, showLogs, setShowLogs,
-    healRepo, resetHealing, pendingApproval, approveHealing, cancelHealing, run,
+    healRepo, isHealing, resetHealing, pendingApproval, approveHealing, cancelHealing, run,
   } = useHealingProcess({
     projects, selectedProject, githubPat, gitlabPat, geminiKey, groqKey, gcloudKey,
     safeMode,
@@ -369,12 +396,18 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   const openSettings = () => { setSettingsKey(k => k + 1); setShowSettings(true); };
 
-  const handleSaveSettings = (pat: string, gitlab: string, gemini: string, groq: string) => {
-    setGithubPat(pat); setGitlabPat(gitlab); setGeminiKey(gemini); setGroqKey(groq);
-    if (pat) sessionStorage.setItem('aegis_pat', pat); else sessionStorage.removeItem('aegis_pat');
-    if (gitlab) sessionStorage.setItem('aegis_gitlab_pat', gitlab); else sessionStorage.removeItem('aegis_gitlab_pat');
-    if (gemini) sessionStorage.setItem('aegis_gemini', gemini); else sessionStorage.removeItem('aegis_gemini');
-    if (groq) sessionStorage.setItem('aegis_groq', groq); else sessionStorage.removeItem('aegis_groq');
+  const handleSaveSettings = (next: AegisSettings) => {
+    setGithubPat(next.githubPat); setGitlabPat(next.gitlabPat); setGeminiKey(next.geminiKey);
+    setGroqKey(next.groqKey); setGcloudKey(next.gcloudKey);
+    setGitlabHostSetting(next.gitlabHost); setGitlabHost(next.gitlabHost); setAutoHeal(next.autoHeal);
+    const keep = (k: string, v: string) => (v ? sessionStorage.setItem(k, v) : sessionStorage.removeItem(k));
+    keep('aegis_pat', next.githubPat);
+    keep('aegis_gitlab_pat', next.gitlabPat);
+    keep('aegis_gemini', next.geminiKey);
+    keep('aegis_groq', next.groqKey);
+    keep('aegis_gcloud', next.gcloudKey);
+    writePref('aegis_gitlab_host', next.gitlabHost);
+    writePref('aegis_auto_heal', next.autoHeal ? '1' : '');
   };
 
   const handleAddRepo = async (urlOverride?: string) => {
@@ -450,6 +483,24 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const handleBack = () => { unselectProject(); resetHealing(); };
 
   const selectedProjectData = projects.find(p => p.id === selectedProject);
+
+  // Props shared by the per-repository pages (CI/CD, Issues, PRs, Branches, Releases, Security, Insights)
+  const pageProps = {
+    projects, selectedProject, onSelectProject: selectProject, onClearProject: unselectProject,
+    githubPat, gitlabPat, onAddRepo: (url: string) => handleAddRepo(url),
+  };
+
+  // Auto-heal: a repo that just turned red starts healing (never interrupts a running heal).
+  useEffect(() => {
+    autoHealRef.current = autoHeal
+      ? (projectId: string) => {
+          if (isHealing()) return;
+          selectProject(projectId);
+          setView('healing');
+          void healRepo(projectId);
+        }
+      : null;
+  });
   const effectivePat = selectedProjectData?.platform === 'gitlab' ? gitlabPat : githubPat;
 
   return (
@@ -460,10 +511,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
         key={settingsKey}
         show={showSettings}
         onClose={() => setShowSettings(false)}
-        currentPat={githubPat}
-        currentGitlabPat={gitlabPat}
-        currentGeminiKey={geminiKey}
-        currentGroqKey={groqKey}
+        current={{ githubPat, gitlabPat, gitlabHost: gitlabHostSetting, groqKey, geminiKey, gcloudKey, autoHeal }}
         onSave={handleSaveSettings}
       />
 
@@ -518,7 +566,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   safeMode={safeMode}
                   onToggleSafeMode={() => setSafeMode(v => !v)}
                   onBack={handleBack}
-                  onHeal={healRepo}
+                  onHeal={() => healRepo()}
                 />
               )}
             </div>
@@ -533,13 +581,24 @@ export function Dashboard({ onLogout }: DashboardProps) {
           </>
         )}
 
-        {view === 'history' && (
-          <HistoryView groqKey={groqKey} refreshKey={historyRefreshKey} />
-        )}
+        <Suspense fallback={<div className="flex-1 flex items-center justify-center font-mono text-[10px] text-[#9A8678]/40 tracking-widest">LOADING_VIEW…</div>}>
+          {view === 'history' && (
+            <HistoryView groqKey={groqKey} refreshKey={historyRefreshKey} />
+          )}
 
-        {view === 'intelligence' && (
-          <IntelligenceView metrics={metrics} loading={metricsLoading} />
-        )}
+          {view === 'intelligence' && (
+            <IntelligenceView metrics={metrics} loading={metricsLoading} />
+          )}
+
+          {view === 'cicd' && <CICDPage {...pageProps} geminiKey={geminiKey} groqKey={groqKey} />}
+          {view === 'issues' && <IssuesPage {...pageProps} geminiKey={geminiKey} groqKey={groqKey} />}
+          {view === 'prs' && <PullRequestsPage {...pageProps} geminiKey={geminiKey} groqKey={groqKey} />}
+          {view === 'insights' && <InsightsPage {...pageProps} geminiKey={geminiKey} groqKey={groqKey} />}
+          {view === 'branches' && <BranchesPage {...pageProps} />}
+          {view === 'releases' && <ReleasesPage {...pageProps} />}
+          {view === 'security' && <SecurityPage {...pageProps} />}
+          {view === 'push' && <div className="flex-1 overflow-y-auto custom-scrollbar"><PushPage githubPat={githubPat} /></div>}
+        </Suspense>
 
       </div>
 

@@ -43,3 +43,43 @@ describe('live healing UI', () => {
     expect(html).not.toContain('NO_PROGRESS_DETECTED');
   });
 });
+
+describe('healing strategies + new views', () => {
+  it('shows the strategy ladder with what was tried and what was used', async () => {
+    const { withStrategy } = await import('../src/app/lib/healingRun');
+    let run = midRun();
+    run = withStrategy(run, 'memory', 'skipped', 'no stored fix for this error');
+    run = withStrategy(run, 'rules', 'done', '1 file(s)');
+    const html = renderToString(createElement(HealingProgressPanel, { run }));
+    for (const text of ['HEALING_STRATEGIES', 'KNOWN FIX', 'RULES', 'FLAKY CHECK', 'AUTO-FIXERS', 'AI', 'REVERT', 'no stored fix for this error', 'used', 'not needed']) {
+      expect(html, text).toContain(text);
+    }
+  });
+
+  it('settings expose the GCloud key, self-hosted GitLab host and auto-heal', async () => {
+    const { SettingsModal } = await import('../src/app/components/SettingsModal');
+    const html = renderToString(createElement(SettingsModal, {
+      show: true, onClose: () => {}, onSave: () => {},
+      current: { githubPat: '', gitlabPat: '', gitlabHost: 'gitlab.acme.io', groqKey: '', geminiKey: '', gcloudKey: '', autoHeal: true },
+    }));
+    for (const text of ['GCLOUD_KEY', 'GITLAB_HOST', 'gitlab.acme.io', 'AUTO_HEAL']) expect(html, text).toContain(text);
+  });
+
+  it('every page reachable from the new tabs renders', async () => {
+    const pages = await Promise.all([
+      import('../src/app/components/CICDPage'), import('../src/app/components/IssuesPage'),
+      import('../src/app/components/PullRequestsPage'), import('../src/app/components/BranchesPage'),
+      import('../src/app/components/ReleasesPage'), import('../src/app/components/SecurityPage'),
+      import('../src/app/components/InsightsPage'), import('../src/app/components/PushPage'),
+    ]);
+    const props = {
+      projects: [{ id: '1', name: 'app', errorType: 'CI_HEALTHY', repo: 'main', severity: 'low' as const, owner: 'o', repoName: 'app', platform: 'github' as const }],
+      selectedProject: '1', onSelectProject: () => {}, onClearProject: () => {},
+      githubPat: 'x', gitlabPat: '', geminiKey: '', groqKey: '', onAddRepo: async () => {},
+    };
+    for (const mod of pages) {
+      const Page = Object.values(mod).find(v => typeof v === 'function') as (p: typeof props) => JSX.Element;
+      expect(() => renderToString(createElement(Page, props)), Page.name).not.toThrow();
+    }
+  });
+});

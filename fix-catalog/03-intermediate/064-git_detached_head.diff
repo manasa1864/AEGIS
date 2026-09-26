@@ -1,0 +1,29 @@
+# Aegis fix catalog #064 — Detached HEAD blocks commit-and-push
+#
+# Tier:       3 · Intermediate
+# Category:   git_detached_head (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | HEAD detached at pull/42/merge
+#   | fatal: You are not currently on a branch.
+#   | To push the history leading to the current (detached HEAD) state now, use git push origin HEAD:<name>
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added ref: github.head_ref to checkout — GitHub Actions checks out a merge commit SHA for PRs, resulting in detached HEAD
+#     - using github.head_ref attaches to the actual PR branch so git commands like git tag, git commit, and branch-aware tools work correctly
+#
+# Apply:      git apply 03-intermediate/064-git_detached_head.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -20,6 +20,8 @@
+     timeout-minutes: 15
+     steps:
+       - uses: actions/checkout@v4
++        with:
++          ref: ${{ github.head_ref || github.ref_name }}
+       - uses: actions/setup-node@v4
+         with:
+           node-version: 20

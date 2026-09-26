@@ -1,6 +1,8 @@
 export type SystemStatus = 'idle' | 'healing' | 'stopped' | 'healthy';
 
-export type View = 'healing' | 'history' | 'intelligence';
+export type View =
+  | 'healing' | 'history' | 'intelligence'
+  | 'cicd' | 'issues' | 'prs' | 'branches' | 'releases' | 'security' | 'insights' | 'push';
 
 export interface Project {
   id: string;

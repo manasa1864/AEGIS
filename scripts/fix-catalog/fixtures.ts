@@ -369,6 +369,21 @@ export const CATALOG: CatalogEntry[] = [
 
   // ═════════════════════════════ TIER 2 — CODE ═════════════════════════════
   {
+    id: 'code-ts-did-you-mean', category: 'compilation_failure', tier: 2, title: "TypeScript misspelling — apply the compiler's suggestion (TS2551)",
+    log: "src/users.ts(4,22): error TS2551: Property 'emial' does not exist on type 'User'. Did you mean 'email'?",
+    files: [{ path: 'src/users.ts', content: "interface User { name: string; email: string }\n\nexport function contact(user: User) {\n  return `${user.name} <${user.emial}>`;\n}\n" }],
+  },
+  {
+    id: 'code-python-did-you-mean', category: 'unhandled_exception', tier: 2, title: "Python NameError — apply the interpreter's suggestion",
+    log: 'Traceback (most recent call last):\n  File "/home/runner/work/app/app/app/cart.py", line 4, in total\n    return subtotl * (1 + tax)\nNameError: name \'subtotl\' is not defined. Did you mean: \'subtotal\'?',
+    files: [{ path: 'app/cart.py', content: 'def total(items, tax):\n    subtotal = sum(i.price for i in items)\n    # apply tax\n    return subtotl * (1 + tax)\n' }],
+  },
+  {
+    id: 'code-rust-similar-name', category: 'rust_build_failure', tier: 2, title: "Rust typo — apply rustc's similar-name suggestion",
+    log: 'error[E0425]: cannot find value `conut` in this scope\n --> src/main.rs:3:20\n  |\n3 |     println!("{}", conut);\n  |                    ^^^^^ help: a local variable with a similar name exists: `count`\nerror: could not compile `app` (bin "app") due to 1 previous error',
+    files: [{ path: 'Cargo.toml', content: '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n' }, { path: 'rust-toolchain.toml', content: '[toolchain]\nchannel = "stable"\n' }, { path: 'src/main.rs', content: 'fn main() {\n    let count = 3;\n    println!("{}", conut);\n}\n' }],
+  },
+  {
     id: 'code-unused-import-ts', category: 'compilation_failure', tier: 2, title: 'TypeScript unused import (TS6133)',
     log: "src/server.ts(2,10): error TS6133: 'readFile' is declared but its value is never read.\nsrc/server.ts(3,1): error TS6192: All imports in import declaration are unused.",
     files: [{ path: 'src/server.ts', content: "import express from 'express';\nimport { readFile, writeFile } from 'node:fs/promises';\nimport { join } from 'node:path';\n\nconst app = express();\nawait writeFile('boot.log', 'started');\napp.listen(3000);\n" }],

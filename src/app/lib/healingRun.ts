@@ -19,7 +19,7 @@ export const PHASES: Array<{ id: PhaseId; label: string; hint: string }> = [
   { id: 'verify',   label: 'VERIFY',   hint: 'CI on fix branch' },
 ];
 
-export type FixSource = 'rule' | 'ai' | 'static' | 'deep' | 'resume';
+export type FixSource = 'memory' | 'rule' | 'autofix' | 'ai' | 'static' | 'deep' | 'resume' | 'lockfile';
 export type FixStatus = 'proposed' | 'blocked' | 'committing' | 'committed' | 'failed';
 
 export interface TrackedFix {
@@ -32,14 +32,27 @@ export interface TrackedFix {
   note?: string;         // block reason / commit error
 }
 
-export type OutcomeKind = 'healed' | 'clean' | 'halted' | 'safe_mode' | 'cancelled' | 'error';
+export type OutcomeKind = 'healed' | 'clean' | 'flaky' | 'halted' | 'safe_mode' | 'cancelled' | 'error';
+
+/** The healing ladder, most useful first — each strategy backs up the one before it. */
+export type StrategyId = 'memory' | 'rules' | 'flaky' | 'autofix' | 'ai' | 'revert';
+export const STRATEGIES: Array<{ id: StrategyId; label: string; hint: string }> = [
+  { id: 'memory',  label: 'KNOWN FIX',   hint: 'replay a fix that already turned this exact error green' },
+  { id: 'rules',   label: 'RULES',       hint: 'deterministic rules + compiler suggestions + exact versions' },
+  { id: 'flaky',   label: 'FLAKY CHECK', hint: 're-run failed jobs; green → change nothing' },
+  { id: 'autofix', label: 'AUTO-FIXERS', hint: "the repo's own eslint/prettier/ruff/gofmt/clippy in CI" },
+  { id: 'ai',      label: 'AI',          hint: 'grounded Gemini → Groq → Gemini' },
+  { id: 'revert',  label: 'REVERT',      hint: 'revert to the last green build, validated on CI' },
+];
+export type StrategyState = 'pending' | 'active' | 'done' | 'failed' | 'skipped';
 
 export interface HealingRun {
   startedAt: number | null;
   phases: Record<PhaseId, PhaseState>;
   failure?: { workflows: string[]; jobs: string[]; steps: string[]; url?: string; sha?: string };
   categories: string[];
-  engine?: 'rules' | 'ai' | 'static';
+  engine?: StrategyId | 'static';
+  strategies: Record<StrategyId, { state: StrategyState; note?: string }>;
   confidence?: number;
   fixes: TrackedFix[];
   branch?: string;
@@ -51,7 +64,14 @@ export interface HealingRun {
 const allPhases = (state: PhaseState): Record<PhaseId, PhaseState> =>
   Object.fromEntries(PHASES.map(p => [p.id, state])) as Record<PhaseId, PhaseState>;
 
-export const emptyRun = (): HealingRun => ({ startedAt: null, phases: allPhases('pending'), categories: [], fixes: [] });
+const pendingStrategies = (): HealingRun['strategies'] =>
+  Object.fromEntries(STRATEGIES.map(s => [s.id, { state: 'pending' as StrategyState }])) as HealingRun['strategies'];
+
+export const emptyRun = (): HealingRun => ({ startedAt: null, phases: allPhases('pending'), categories: [], fixes: [], strategies: pendingStrategies() });
+
+export function withStrategy(run: HealingRun, id: StrategyId, state: StrategyState, note?: string): HealingRun {
+  return { ...run, strategies: { ...run.strategies, [id]: { state, note } } };
+}
 
 export const startRun = (): HealingRun => ({ ...emptyRun(), startedAt: Date.now(), phases: { ...allPhases('pending'), detect: 'active' } });
 
@@ -118,7 +138,12 @@ export function withOutcome(run: HealingRun, kind: OutcomeKind, reason: string):
     if (phases[p.id] === 'active') phases[p.id] = failedKinds.includes(kind) ? 'failed' : kind === 'cancelled' ? 'skipped' : 'done';
     else if (phases[p.id] === 'pending') phases[p.id] = 'skipped';
   }
-  return { ...run, phases, outcome: { kind, reason } };
+  // A strategy still running when the run ends did not deliver; untried ones stay "pending" (not needed).
+  const strategies = { ...run.strategies };
+  for (const s of STRATEGIES) {
+    if (strategies[s.id].state === 'active') strategies[s.id] = { state: kind === 'cancelled' ? 'skipped' : 'failed', note: strategies[s.id].note };
+  }
+  return { ...run, phases, strategies, outcome: { kind, reason } };
 }
 
 /** Advance phases/statuses from an intelligence-stream message. The hook emits
@@ -130,7 +155,7 @@ export function applyStreamMessage(run: HealingRun, message: string, url?: strin
 
   if (has('fetching_workflow_runs') || has('fetching_pipelines')) return withPhase(run, 'detect', 'active');
   if (message.startsWith('ci_failure ::') || message.startsWith('pipeline_failure ::')) return withPhase(run, 'analyze', 'active');
-  if (has('#2 :: strategy=ai_analysis')) return withPhase(run, 'diagnose', 'active');
+  if (has('#2 :: strategy=')) return withPhase(run, 'diagnose', 'active');
   if (message.startsWith('ERROR_DIAGNOSED')) return withPhase(run, 'fix', 'active');
   if (has('strategy=create_branch')) {
     return withPhase({ ...run, branch: message.match(/name=(\S+)/)?.[1] ?? run.branch }, 'commit', 'active');
@@ -187,7 +212,7 @@ export function nodeStatusFor(run: HealingRun, nodeId: string): NodeStatus {
     case 'database':
       return run.fixes.some(f => f.status === 'committing') ? 'active' : from('commit');
     case 'core':
-      if (run.outcome?.kind === 'healed' || run.outcome?.kind === 'clean') return 'success';
+      if (run.outcome && ['healed', 'clean', 'flaky'].includes(run.outcome.kind)) return 'success';
       if (run.outcome && ['halted', 'error'].includes(run.outcome.kind)) return 'error';
       return run.startedAt && !run.outcome ? 'active' : 'idle';
     default: return 'idle';

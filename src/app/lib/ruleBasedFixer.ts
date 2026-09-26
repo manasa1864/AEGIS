@@ -540,6 +540,7 @@ import {
 
 // ── Code — surgical edits to application source at log-referenced lines ────
 import {
+  fixCompilerSuggestions,
   fixUnusedImports, fixPythonUnusedImports, fixPreferConst, fixDebuggerStatements,
   fixWhitespaceLint, fixFocusedTests, fixUnusedTsExpectError, fixNullDerefAtStackFrame,
   fixMissingNpmPackage, fixMissingPythonPackage,
@@ -3005,6 +3006,7 @@ export function applyRuleBasedFixes(
   // CODE — surgical source edits (all log-gated: each fires only when the CI
   // output names the exact problem, and edits only the file/line it names)
   // ════════════════════════════════════════════════════════════════════════
+  applyBatch(fixCompilerSuggestions(logs, snap()));
   applyBatch(fixUnusedImports(logs, snap()));
   applyBatch(fixPythonUnusedImports(logs, snap()));
   applyBatch(fixPreferConst(logs, snap()));

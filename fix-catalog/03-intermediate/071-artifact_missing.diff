@@ -1,0 +1,64 @@
+# Aegis fix catalog #071 — Download job runs before the upload job
+#
+# Tier:       3 · Intermediate
+# Category:   artifact_missing (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error: Unable to download artifact(s): Artifact not found for name: build-output
+#   | No artifact found with name build-output
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added NODE_ENV=test and CI=true — webpack/babel/jest/vite toggle behavior on NODE_ENV
+#     - CI=true disables interactive prompts so tests do not hang
+#     - Added retention-days: 7 to artifact uploads — artifacts default to 90 days which wastes storage quota
+#     - 7 days is sufficient for most CI debugging purposes
+#     - Added needs: [build] to downstream jobs — without needs:, jobs run in parallel even when they depend on build artifacts
+#     - this causes "artifact not found" and "module not compiled" errors
+#     - Added paths-ignore to push trigger — CI runs triggered by README edits, doc updates, and license changes waste runner minutes
+#     - paths-ignore skips the workflow when all changed files match the ignored patterns
+#     - Added if-no-files-found: error — the default is "warn" which lets a missing artifact pass silently
+#     - downstream download-artifact steps then fail with a confusing "artifact not found" message
+#     - "error" fails immediately with a clear message at the upload step
+#     - Changed if-no-files-found: error → warn — build may not produce artifacts on every run (e.g. draft PRs, lint-only)
+#     - Added concurrency group (cancel-in-progress: false) — prevents simultaneous deploy runs from racing each other
+#     - cancel-in-progress: false ensures deploys complete rather than being cancelled mid-flight
+#
+# Apply:      git apply 03-intermediate/071-artifact_missing.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -1,11 +1,21 @@
+ name: CI
++concurrency:
++  group: ${{ github.workflow }}-${{ github.ref }}
++  cancel-in-progress: false
++
+ on:
+   push:
+     branches: [main]
++    paths-ignore:
++      - '**.md'
++      - 'docs/**'
++      - '.github/CODEOWNERS'
++      - 'LICENSE'
+ permissions:
+   contents: read
+ env:
+   CI: 'true'
++  NODE_ENV: test
+ jobs:
+   build:
+     runs-on: ubuntu-latest
+@@ -17,7 +27,10 @@
+         with:
+           name: build-output
+           path: dist/
++          if-no-files-found: warn
++          retention-days: 7
+   deploy:
++    needs: [build]
+     runs-on: ubuntu-latest
+     timeout-minutes: 15
+     steps:

@@ -21,6 +21,8 @@ export interface WorkflowRun {
   conclusion: string;
   html_url: string;
   created_at: string;
+  head_sha?: string;
+  head_branch?: string;
   head_commit: { message: string; id: string };
 }
 
@@ -392,4 +394,174 @@ export async function getOpenAegisPR(
   );
   if (!aegisPR) return null;
   return { number: aegisPR.number, branch: aegisPR.head.ref, html_url: aegisPR.html_url };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Fallback-strategy API (flaky rerun, autofix job, revert-to-last-green)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Full job log (timestamps stripped) — getJobLogs keeps only the tail. */
+export async function getJobLogsFull(pat: string, owner: string, repo: string, jobId: number): Promise<string> {
+  try {
+    const res = await fetch(`${BASE}/repos/${owner}/${repo}/actions/jobs/${jobId}/logs`, { headers: h(pat), redirect: 'follow' });
+    if (!res.ok) return '';
+    return (await res.text()).split('\n').map(l => l.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z /, '')).join('\n');
+  } catch {
+    return '';
+  }
+}
+
+/** Re-run only the failed jobs of a workflow run (new attempt on the same run id). */
+export async function rerunFailedJobs(pat: string, owner: string, repo: string, runId: number): Promise<boolean> {
+  const res = await fetch(`${BASE}/repos/${owner}/${repo}/actions/runs/${runId}/rerun-failed-jobs`, {
+    method: 'POST', headers: h(pat),
+  }).catch(() => null);
+  return !!res?.ok;
+}
+
+export async function getRun(pat: string, owner: string, repo: string, runId: number): Promise<WorkflowRun | null> {
+  const res = await fetch(`${BASE}/repos/${owner}/${repo}/actions/runs/${runId}`, { headers: h(pat) }).catch(() => null);
+  if (!res?.ok) return null;
+  return res.json().catch(() => null);
+}
+
+/** Poll one run until it completes. Returns its conclusion bucket. */
+export async function waitForRun(
+  pat: string, owner: string, repo: string, runId: number,
+  maxWaitMs = 8 * 60_000, pollMs = 15_000, isCancelled: () => boolean = () => false,
+): Promise<'success' | 'failure' | 'timeout'> {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline && !isCancelled()) {
+    await new Promise(r => setTimeout(r, pollMs));
+    const run = await getRun(pat, owner, repo, runId);
+    if (!run || run.status !== 'completed') continue;
+    return run.conclusion === 'success' ? 'success' : 'failure';
+  }
+  return 'timeout';
+}
+
+/** Newest successful run of a workflow on a branch — the "last green" commit. */
+export async function getLastGreenRun(
+  pat: string, owner: string, repo: string, branch: string, workflowId?: number,
+): Promise<WorkflowRun | null> {
+  const path = workflowId ? `actions/workflows/${workflowId}/runs` : 'actions/runs';
+  const res = await fetch(`${BASE}/repos/${owner}/${repo}/${path}?branch=${encRef(branch)}&status=success&per_page=1`, { headers: h(pat) }).catch(() => null);
+  if (!res?.ok) return null;
+  const d = await res.json().catch(() => null);
+  return d?.workflow_runs?.[0] ?? null;
+}
+
+export interface CommitSummary { sha: string; message: string; parent: string | null }
+export interface ChangedFile { path: string; status: 'added' | 'removed' | 'modified' | 'renamed'; previousPath?: string }
+
+/** Commits and changed files between a good and a bad commit (base...head). */
+export async function compareCommits(
+  pat: string, owner: string, repo: string, base: string, head: string,
+): Promise<{ commits: CommitSummary[]; files: ChangedFile[] } | null> {
+  const res = await fetch(`${BASE}/repos/${owner}/${repo}/compare/${base}...${head}`, { headers: h(pat) }).catch(() => null);
+  if (!res?.ok) return null;
+  const d = await res.json().catch(() => null);
+  if (!d) return null;
+  return {
+    commits: (d.commits ?? []).map((c: { sha: string; commit: { message: string }; parents?: Array<{ sha: string }> }) => ({
+      sha: c.sha, message: c.commit.message.split('\n')[0], parent: c.parents?.[0]?.sha ?? null,
+    })),
+    files: (d.files ?? []).map((f: { filename: string; status: string; previous_filename?: string }) => ({
+      path: f.filename,
+      status: (['added', 'removed', 'renamed'].includes(f.status) ? f.status : 'modified') as ChangedFile['status'],
+      previousPath: f.previous_filename,
+    })),
+  };
+}
+
+/** Files changed by a single commit. */
+export async function getCommitFiles(pat: string, owner: string, repo: string, sha: string): Promise<ChangedFile[]> {
+  const res = await fetch(`${BASE}/repos/${owner}/${repo}/commits/${sha}`, { headers: h(pat) }).catch(() => null);
+  if (!res?.ok) return [];
+  const d = await res.json().catch(() => null);
+  return (d?.files ?? []).map((f: { filename: string; status: string; previous_filename?: string }) => ({
+    path: f.filename,
+    status: (['added', 'removed', 'renamed'].includes(f.status) ? f.status : 'modified') as ChangedFile['status'],
+    previousPath: f.previous_filename,
+  }));
+}
+
+export async function getBranchSha(pat: string, owner: string, repo: string, branch: string): Promise<string | null> {
+  const res = await fetch(`${BASE}/repos/${owner}/${repo}/git/ref/heads/${encPath(branch)}`, { headers: h(pat) }).catch(() => null);
+  if (!res?.ok) return null;
+  return (await res.json().catch(() => null))?.object?.sha ?? null;
+}
+
+export async function deleteFile(
+  pat: string, owner: string, repo: string, path: string, message: string, branch: string,
+): Promise<boolean> {
+  const current = await fetchRepoFile(pat, owner, repo, path, branch);
+  if (!current?.sha) return false;
+  const res = await fetch(`${BASE}/repos/${owner}/${repo}/contents/${encPath(path)}`, {
+    method: 'DELETE',
+    headers: { ...h(pat), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, sha: current.sha, branch }),
+  }).catch(() => null);
+  return !!res?.ok;
+}
+
+export async function deleteBranch(pat: string, owner: string, repo: string, branch: string): Promise<boolean> {
+  const res = await fetch(`${BASE}/repos/${owner}/${repo}/git/refs/heads/${encPath(branch)}`, {
+    method: 'DELETE', headers: h(pat),
+  }).catch(() => null);
+  return !!res?.ok;
+}
+
+/** Newest workflow run on a branch whose workflow name matches (e.g. the Aegis autofix job). */
+export async function findRunOnBranch(
+  pat: string, owner: string, repo: string, branch: string, workflowName?: string,
+): Promise<WorkflowRun | null> {
+  const res = await fetch(`${BASE}/repos/${owner}/${repo}/actions/runs?branch=${encRef(branch)}&per_page=10`, { headers: h(pat) }).catch(() => null);
+  if (!res?.ok) return null;
+  const runs: WorkflowRun[] = (await res.json().catch(() => null))?.workflow_runs ?? [];
+  return runs.find(r => !workflowName || r.name === workflowName) ?? null;
+}
+
+// ── Git Data API — build a single commit from file-level restores ────────────
+
+export interface TreeEntry { path: string; mode: string; sha: string; type: string }
+
+/** Every blob in a commit's tree (path → mode + blob sha). */
+export async function getTreeEntries(pat: string, owner: string, repo: string, commitSha: string): Promise<Map<string, TreeEntry> | null> {
+  const res = await fetch(`${BASE}/repos/${owner}/${repo}/git/trees/${commitSha}?recursive=1`, { headers: h(pat) }).catch(() => null);
+  if (!res?.ok) return null;
+  const d = await res.json().catch(() => null);
+  if (!d?.tree || d.truncated) return null; // truncated trees are unsafe to restore from
+  return new Map((d.tree as TreeEntry[]).filter(e => e.type === 'blob').map(e => [e.path, e]));
+}
+
+/**
+ * Create one commit on top of `parentSha` where each listed path is set to the
+ * given blob (restore) or removed (`null`), then point a NEW branch at it.
+ */
+export async function createBranchWithCommit(
+  pat: string, owner: string, repo: string, branch: string, parentSha: string,
+  changes: Array<{ path: string; entry: TreeEntry | null }>, message: string,
+): Promise<string | null> {
+  const json = { ...h(pat), 'Content-Type': 'application/json' };
+  const parent = await fetch(`${BASE}/repos/${owner}/${repo}/git/commits/${parentSha}`, { headers: h(pat) }).then(r => (r.ok ? r.json() : null)).catch(() => null);
+  if (!parent?.tree?.sha) return null;
+  const tree = await fetch(`${BASE}/repos/${owner}/${repo}/git/trees`, {
+    method: 'POST', headers: json,
+    body: JSON.stringify({
+      base_tree: parent.tree.sha,
+      tree: changes.map(c => (c.entry
+        ? { path: c.path, mode: c.entry.mode, type: 'blob', sha: c.entry.sha }
+        : { path: c.path, mode: '100644', type: 'blob', sha: null })),
+    }),
+  }).then(r => (r.ok ? r.json() : null)).catch(() => null);
+  if (!tree?.sha) return null;
+  const commit = await fetch(`${BASE}/repos/${owner}/${repo}/git/commits`, {
+    method: 'POST', headers: json, body: JSON.stringify({ message, tree: tree.sha, parents: [parentSha] }),
+  }).then(r => (r.ok ? r.json() : null)).catch(() => null);
+  if (!commit?.sha) return null;
+  const ref = await fetch(`${BASE}/repos/${owner}/${repo}/git/refs`, {
+    method: 'POST', headers: json, body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: commit.sha }),
+  }).catch(() => null);
+  return ref?.ok ? commit.sha : null;
 }

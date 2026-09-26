@@ -1,0 +1,26 @@
+# Aegis fix catalog #073 — node_modules cache with no restore fallback
+#
+# Tier:       3 · Intermediate
+# Category:   cache_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Cache not found for input keys: Linux-node-modules-8f14e45
+#   | Warning: Failed to restore cache — cache miss on every run
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added restore-keys fallback to npm cache — without a fallback the cache never hits after the first run (exact key miss = no cache)
+#     - the fallback allows partial cache reuse from similar builds
+#
+# Apply:      git apply 03-intermediate/073-cache_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -24,4 +24,6 @@
+         with:
+           path: node_modules
+           key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
++          restore-keys: |
++            ${{ runner.os }}-node-modules-
+       - run: npm ci

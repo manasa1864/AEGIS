@@ -28,7 +28,7 @@ export function HealingDetailView({
   const isLive = isConnected && !!effectivePat;
   const missingPat = isConnected && !effectivePat;
   const patLabel = project.platform === 'gitlab' ? 'GITLAB_PAT' : 'GITHUB_PAT';
-  const showCI = isLive && project.platform !== 'gitlab';
+  const showCI = isLive;
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -128,7 +128,7 @@ export function HealingDetailView({
           </div>
         )}
 
-        {/* CI health panel — GitHub only, visible when live */}
+        {/* CI health panel — GitHub workflows or GitLab pipeline jobs, visible when live */}
         {showCI && (
           <div className="border-t border-[#CAAA98]/10 flex-shrink-0" style={{ height: hasRun ? '170px' : '240px' }}>
             <CIHealthPanel project={project} pat={effectivePat} refreshKey={ciRefreshKey} live={systemStatus === 'healing'} />

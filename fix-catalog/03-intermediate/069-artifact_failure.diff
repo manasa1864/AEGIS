@@ -1,0 +1,28 @@
+# Aegis fix catalog #069 — Artifact upload finds no files
+#
+# Tier:       3 · Intermediate
+# Category:   artifact_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Warning: No files were found with the provided path: dist/. No artifacts will be uploaded.
+#   | Error: artifact not found
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added retention-days: 7 to artifact uploads — artifacts default to 90 days which wastes storage quota
+#     - 7 days is sufficient for most CI debugging purposes
+#     - Added if-no-files-found: error — the default is "warn" which lets a missing artifact pass silently
+#     - downstream download-artifact steps then fail with a confusing "artifact not found" message
+#     - "error" fails immediately with a clear message at the upload step
+#
+# Apply:      git apply 03-intermediate/069-artifact_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -30,3 +30,5 @@
+         with:
+           name: dist
+           path: dist/
++          if-no-files-found: error
++          retention-days: 7

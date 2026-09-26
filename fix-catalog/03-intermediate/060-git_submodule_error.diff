@@ -1,0 +1,30 @@
+# Aegis fix catalog #060 — Submodules not checked out
+#
+# Tier:       3 · Intermediate
+# Category:   git_submodule_error (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | fatal: No url found for submodule path 'vendor/sdk' in .gitmodules
+#   | fatal: repository 'vendor/sdk' does not exist — submodule update failed
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added submodules: recursive + token to checkout — submodule init failed
+#     - recursive clones nested submodules
+#     - token authenticates private submodule repos
+#
+# Apply:      git apply 03-intermediate/060-git_submodule_error.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -20,6 +20,9 @@
+     timeout-minutes: 15
+     steps:
+       - uses: actions/checkout@v4
++        with:
++          submodules: recursive
++          token: ${{ secrets.GITHUB_TOKEN }}
+       - uses: actions/setup-node@v4
+         with:
+           node-version: 20

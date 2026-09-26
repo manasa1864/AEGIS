@@ -1,0 +1,26 @@
+# Aegis fix catalog #035 — Leftover `breakpoint()` blocks pytest
+#
+# Tier:       2 · Source code
+# Category:   test_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | tests/test_pricing.py:9: in test_discount
+#   |     breakpoint()
+#   | E   OSError: pytest: reading from stdin while output is captured!  Consider using `-s`.
+#   | FAILED tests/test_pricing.py::test_discount - OSError
+#
+# How it is solved:
+#   MODIFY tests/test_pricing.py
+#     - Removed leftover breakpoint()/pdb.set_trace() — a debugger left in committed code fails the lint gate or blocks CI waiting for interactive input
+#
+# Apply:      git apply 02-code/035-code-python-breakpoint.diff
+diff --git a/tests/test_pricing.py b/tests/test_pricing.py
+--- a/tests/test_pricing.py
++++ b/tests/test_pricing.py
+@@ -6,5 +6,4 @@
+ 
+ 
+ def test_discount():
+-    breakpoint()
+     assert discount(100, 10) == 90

@@ -15,6 +15,14 @@ const TABS: { id: View; label: string }[] = [
   { id: 'healing',      label: 'HEALING' },
   { id: 'history',      label: 'HISTORY' },
   { id: 'intelligence', label: 'INTELLIGENCE' },
+  { id: 'cicd',         label: 'CI/CD' },
+  { id: 'issues',       label: 'ISSUES' },
+  { id: 'prs',          label: 'PULL_REQUESTS' },
+  { id: 'branches',     label: 'BRANCHES' },
+  { id: 'releases',     label: 'RELEASES' },
+  { id: 'security',     label: 'SECURITY' },
+  { id: 'insights',     label: 'INSIGHTS' },
+  { id: 'push',         label: 'PUSH' },
 ];
 
 export function TopBar({ systemStatus, view, onViewChange, anyPatSet, onOpenSettings, onLogout }: TopBarProps) {

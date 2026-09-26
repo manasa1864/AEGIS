@@ -4,7 +4,7 @@ import {
   CheckCircle, XCircle, Loader2, Circle, MinusCircle, ChevronDown, ChevronRight,
   ExternalLink, GitBranch, GitPullRequest, ShieldAlert, FileCode2,
 } from 'lucide-react';
-import { PHASES, type HealingRun, type PhaseState, type TrackedFix } from '../lib/healingRun';
+import { PHASES, STRATEGIES, type HealingRun, type PhaseState, type StrategyState, type TrackedFix } from '../lib/healingRun';
 import { DiffView } from './DiffView';
 
 const C = {
@@ -33,12 +33,27 @@ const FIX_STATUS: Record<TrackedFix['status'], { label: string; color: string }>
 };
 
 const SOURCE_LABEL: Record<TrackedFix['source'], string> = {
-  rule: 'RULE', ai: 'AI', static: 'STATIC', deep: 'DEEP_PASS', resume: 'RESUME',
+  memory: 'KNOWN_FIX', rule: 'RULE', autofix: 'AUTO_FIXER', ai: 'AI', static: 'STATIC',
+  deep: 'DEEP_PASS', resume: 'RESUME', lockfile: 'LOCKFILE',
+};
+
+const STRATEGY_STYLE: Record<StrategyState, { color: string; label: string }> = {
+  pending: { color: C.muted, label: 'not needed' },
+  active:  { color: C.amber, label: 'trying…' },
+  done:    { color: C.green, label: 'used' },
+  failed:  { color: C.red, label: 'no fix' },
+  skipped: { color: C.muted, label: 'skipped' },
+};
+
+const ENGINE_LABEL: Record<NonNullable<HealingRun['engine']>, string> = {
+  memory: 'replayed known fix', rules: 'deterministic rules', flaky: 'flaky check', autofix: "project's own auto-fixers",
+  ai: 'AI analysis', revert: 'revert to last green', static: 'static YAML analysis',
 };
 
 const OUTCOME: Record<NonNullable<HealingRun['outcome']>['kind'], { label: string; color: string }> = {
   healed:    { label: 'HEALED',        color: C.green },
   clean:     { label: 'CI_ALREADY_GREEN', color: C.green },
+  flaky:     { label: 'FLAKY — NO CODE CHANGE', color: C.green },
   halted:    { label: 'HALTED',        color: C.red },
   safe_mode: { label: 'SAFE_MODE',     color: C.amber },
   cancelled: { label: 'CANCELLED',     color: C.muted },
@@ -138,7 +153,7 @@ export function HealingProgressPanel({ run }: { run: HealingRun }) {
         <AnimatePresence>
           {outcome && run.outcome && (
             <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="border px-3 py-2 flex items-start gap-2" style={{ borderColor: outcome.color + '50', backgroundColor: outcome.color + '10' }}>
-              {run.outcome.kind === 'healed' || run.outcome.kind === 'clean'
+              {['healed', 'clean', 'flaky'].includes(run.outcome.kind)
                 ? <CheckCircle className="w-4 h-4 flex-shrink-0" style={{ color: outcome.color }} strokeWidth={1.5} />
                 : <ShieldAlert className="w-4 h-4 flex-shrink-0" style={{ color: outcome.color }} strokeWidth={1.5} />}
               <div className="min-w-0">
@@ -148,6 +163,30 @@ export function HealingProgressPanel({ run }: { run: HealingRun }) {
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* Healing strategies — tried in order, each a backup for the one before */}
+        {Object.values(run.strategies).some(st => st.state !== 'pending') && (
+          <div>
+            <div className="font-mono text-[8px] text-[#9A8678]/50 tracking-widest mb-1.5">HEALING_STRATEGIES · tried in order</div>
+            <div className="space-y-1">
+              {STRATEGIES.map((st, i) => {
+                const cur = run.strategies[st.id];
+                const style = STRATEGY_STYLE[cur.state];
+                return (
+                  <div key={st.id} className="flex items-center gap-2 font-mono text-[9px]" title={st.hint}>
+                    <span className="w-4 text-right text-[#9A8678]/40">{i + 1}</span>
+                    {cur.state === 'active'
+                      ? <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" style={{ color: style.color }} />
+                      : <Circle className="w-2 h-2 flex-shrink-0" style={{ color: style.color, fill: cur.state === 'done' ? style.color : 'transparent', opacity: cur.state === 'pending' ? 0.35 : 1 }} />}
+                    <span className="w-24 flex-shrink-0" style={{ color: style.color, opacity: cur.state === 'pending' ? 0.45 : 1 }}>{st.label}</span>
+                    <span className="w-16 flex-shrink-0" style={{ color: style.color, opacity: cur.state === 'pending' ? 0.45 : 0.8 }}>{style.label}</span>
+                    {cur.note && <span className="text-[#9A8678]/70 truncate">{cur.note}</span>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* What failed */}
         {run.failure && (
@@ -193,7 +232,7 @@ export function HealingProgressPanel({ run }: { run: HealingRun }) {
         {run.engine && (
           <div className="flex items-center gap-3">
             <span className="font-mono text-[8px] text-[#9A8678]/50 tracking-widest">ENGINE</span>
-            <span className="font-mono text-[9px] text-[#CAAA98]">{run.engine === 'rules' ? 'deterministic rules' : run.engine === 'ai' ? 'AI analysis' : 'static YAML analysis'}</span>
+            <span className="font-mono text-[9px] text-[#CAAA98]">{ENGINE_LABEL[run.engine]}</span>
             {run.confidence !== undefined && (
               <div className="flex items-center gap-2 flex-1 max-w-[180px]">
                 <div className="h-1 flex-1 bg-[#202940] overflow-hidden">

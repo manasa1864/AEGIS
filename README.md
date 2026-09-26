@@ -22,12 +22,14 @@ Static YAML analysis (no logs needed — catches syntax bugs immediately)
     ▼
 Log-based error classification → 116 categories, ranked by confidence
     │
-    ├── Rule-based fixers match? ──YES──► Apply matching deterministic fixes
-    │                                     (CI config AND surgical source-code edits)
-    │                                            │
-    └── No match / unknown ──────────────► AI analysis (Groq → Vertex AI → Gemini)
-                                                 │
-    ◄────────────────────────────────────────────┘
+    ▼
+Healing ladder — each strategy is a backup for the one before it:
+    1. Known fix       replay a fix that already turned this exact error green
+    2. Rules           deterministic rules + compiler "did you mean" + exact versions
+    3. Flaky check     re-run failed jobs; green → change nothing  (first, if causes are transient)
+    4. Auto-fixers     the repo's own eslint/prettier/ruff/black/gofmt/clippy/lockfile in CI
+    5. AI              grounded Gemini → Groq → Gemini (refuses partially-seen files)
+    6. Revert          revert to the last green build, candidates validated on CI
     │
     ▼
 Merge static fixes + AI/rule fixes (deduped by file path)
@@ -42,7 +44,7 @@ Confidence < 65%? → Pause and show approval modal to operator
 Create fix branch → commit fixes → open PR/MR
     │
     ▼
-Poll CI on fix branch (60s) → deep second-pass diagnosis if still red
+Poll CI on fix branch → deep second pass if still red → still red? escalate to revert-to-last-green
     │
     ▼
 Record MTTR, save failure embedding for future similarity matching
@@ -223,11 +225,13 @@ The system tries Groq first, then Vertex AI, then Gemini. All three are optional
 | Bitbucket Pipelines | ❌ Not supported | No Bitbucket API integration |
 | CircleCI / Jenkins | ❌ Not supported | Only GitHub Actions and GitLab CI |
 | GitHub Enterprise Server | ❌ Not supported | Hardcoded to `github.com` |
-| Webhook auto-trigger | ❌ Not implemented | Healing must be triggered manually from the dashboard |
+| Self-hosted GitLab | ✅ Working | Settings → GITLAB_HOST (the instance must allow CORS from the dashboard) |
+| Auto-heal | ✅ Working | Settings → AUTO_HEAL: while the dashboard is open, a repo whose CI turns red starts healing (30s polling; not a server-side webhook) |
+| Non-AI healing strategies | ✅ Working | Known-fix replay, compiler suggestions, exact versions, flaky rerun, the repo's own auto-fixers in CI, revert-to-last-green |
 | Slack / Teams notifications | ❌ Not implemented | No outbound notification channel |
 | Live healing view + per-file diffs | ✅ Working | Phase stepper, diagnosed causes, each fix's diff and commit status, PR + CI verdict update live |
 | Code-level fixes | ✅ Working | Surgical edits at the logged file:line (unused imports, prefer-const, debugger, `.only`, TS2578, null deref, missing packages) |
-| Fix catalog | ✅ Working | `fix-catalog/` — 128 real engine diffs across 115 categories, simple → complex |
+| Fix catalog | ✅ Working | `fix-catalog/` — 131 real engine diffs across 115 categories, simple → complex |
 | GitLab MCP tool calls | ⚠️ Partial | MCP bridge server (`server.js`) exists but tool coverage is limited |
 | `unknown` category auto-fix | ⚠️ AI only | No rule-based fixer; depends entirely on Groq / Gemini output |
 
@@ -362,6 +366,23 @@ aegis/
 
 ---
 
+## Healing Ladder (non-AI first)
+
+Aegis tries strategies in a fixed order — cheapest, safest and most proven first; AI is the last resort before reverting. Every result passes the same safety validator (YAML parse, dangerous-pattern, path checks) before anything is committed, and the live view shows each strategy as *used / no fix / skipped / not needed*.
+
+| # | Strategy | What it does | Cost |
+|---|---|---|---|
+| 1 | **Known fix** | Replays a fix that previously resolved the identical error (hashed error signature), only if every file it touches is byte-identical to before | instant |
+| 2 | **Rules** | ~1,000 deterministic rules, surgical code fixers, and the compiler's own *did you mean* suggestions (TypeScript, Python, rustc). `"latest"` versions are resolved to exact ones from npm / PyPI | instant |
+| 3 | **Flaky check** | Re-runs only the failed jobs; if they pass, nothing is changed. Runs *before* the rules when every diagnosed cause is transient (timeouts, rate limits, runners) | one CI rerun |
+| 4 | **Auto-fixers** | Pushes a throwaway branch with a tiny CI job that runs the repo's **own** tools with its own config — `eslint --fix`, `prettier --write`, `ruff`, `black`, `isort`, `gofmt`, `go mod tidy`, `cargo fmt`, `cargo clippy --fix`, `dotnet format`, lockfile refresh — and reads the changed files back from the log. The job is read-only and the branch is deleted | one CI job |
+| 5 | **AI** | Search-grounded Gemini → Groq → Gemini, with the low-confidence approval gate. Rewrites of files the model saw only partially are refused | API call |
+| 6 | **Revert** | Finds the last green run, builds candidate reverts (each recent commit alone, then the whole range), validates them on CI in parallel and opens a PR for the first that goes green | parallel CI runs |
+
+After a fix PR is opened, CI on the fix branch is verified; if it stays red after the deep second pass, Aegis escalates to step 6. When a fix changes declared dependencies, the lockfile is regenerated by the auto-fixer job so `npm ci` / `pnpm install --frozen-lockfile` keep working.
+
+---
+
 ## Live Healing View
 
 While a heal runs, the repository page shows the run as it happens, not a static graph:
@@ -380,7 +401,7 @@ State lives in `src/app/lib/healingRun.ts` (pure reducer), rendered by `HealingP
 
 ## Fix Catalog
 
-[`fix-catalog/`](fix-catalog/README.md) has one `.diff` per failure scenario (128 scenarios, 115 error categories), numbered from the simplest fix to the most complex:
+[`fix-catalog/`](fix-catalog/README.md) has one `.diff` per failure scenario (131 scenarios, 115 error categories), numbered from the simplest fix to the most complex:
 
 | Tier | Folder | What it covers |
 |---|---|---|

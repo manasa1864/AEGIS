@@ -5,6 +5,7 @@ import {
   RefreshCw, AlertTriangle, Clock,
 } from 'lucide-react';
 import { getComprehensiveCI, isFailedConclusion, WorkflowCheckStatus } from '../lib/github';
+import { getPipelineHealth } from '../lib/gitlab';
 import { apiGetEvents } from '../lib/backendApi';
 import { HealingEventRecord, Project } from '../types';
 
@@ -47,7 +48,10 @@ export function CIHealthPanel({ project, pat, refreshKey = 0, live = false }: CI
     try {
       const projectKey = `${project.owner}/${project.repoName}`;
       const [ciChecks, events] = await Promise.all([
-        getComprehensiveCI(pat, project.owner, project.repoName),
+        // scan the repo's own default branch (was hard-coded to 'main'); GitLab → newest pipeline's jobs
+        project.platform === 'gitlab'
+          ? getPipelineHealth(pat, project.owner, project.repoName, project.repo || 'main')
+          : getComprehensiveCI(pat, project.owner, project.repoName, project.repo || 'main'),
         apiGetEvents(projectKey).catch(() => [] as HealingEventRecord[]),
       ]);
       setChecks(ciChecks);
@@ -57,7 +61,7 @@ export function CIHealthPanel({ project, pat, refreshKey = 0, live = false }: CI
     } finally {
       setLoading(false);
     }
-  }, [project.owner, project.repoName, pat]);
+  }, [project.owner, project.repoName, project.platform, project.repo, pat]);
 
   useEffect(() => { load(); }, [load, refreshKey]);
 

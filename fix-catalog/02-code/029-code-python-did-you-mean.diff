@@ -1,0 +1,27 @@
+# Aegis fix catalog #029 — Python NameError — apply the interpreter's suggestion
+#
+# Tier:       2 · Source code
+# Category:   unhandled_exception
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Traceback (most recent call last):
+#   |   File "/home/runner/work/app/app/app/cart.py", line 4, in total
+#   |     return subtotl * (1 + tax)
+#   | NameError: name 'subtotl' is not defined. Did you mean: 'subtotal'?
+#
+# How it is solved:
+#   MODIFY app/cart.py
+#     - Applied the compiler's own "did you mean" suggestion: subtotl → subtotal (line 4) — the compiler named the correct identifier
+#     - only that token at the reported location was changed
+#
+# Apply:      git apply 02-code/029-code-python-did-you-mean.diff
+diff --git a/app/cart.py b/app/cart.py
+--- a/app/cart.py
++++ b/app/cart.py
+@@ -1,4 +1,4 @@
+ def total(items, tax):
+     subtotal = sum(i.price for i in items)
+     # apply tax
+-    return subtotl * (1 + tax)
++    return subtotal * (1 + tax)

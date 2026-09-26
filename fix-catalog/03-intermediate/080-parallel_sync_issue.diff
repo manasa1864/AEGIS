@@ -1,0 +1,49 @@
+# Aegis fix catalog #080 — Parallel jobs racing on shared state
+#
+# Tier:       3 · Intermediate
+# Category:   parallel_sync_issue (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error: EEXIST: file already exists, mkdir '/tmp/test-db'
+#   | race condition between parallel jobs — parallel job sync failed
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added fail-fast: false to matrix strategy — by default GitHub cancels all matrix jobs when one fails
+#     - fail-fast: false lets all matrix combinations complete so you see ALL failures across Node versions/OSes, not just the first one
+#     - Added ci-success fan-in job — branch protection rules require a specific job to pass
+#     - a matrix job's individual entries cannot be referenced by name in branch protection
+#     - a fan-in summary job provides a stable single job name that aggregates all matrix results
+#
+# Apply:      git apply 03-intermediate/080-parallel_sync_issue.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -19,6 +19,7 @@
+     runs-on: ubuntu-latest
+     timeout-minutes: 15
+     strategy:
++      fail-fast: false
+       matrix:
+         shard: [1, 2, 3]
+     steps:
+@@ -29,3 +30,18 @@
+           cache: npm
+       - run: npm ci
+       - run: npm test -- --shard=${{ matrix.shard }}/3
++
++  ci-success:
++    name: CI passed
++    if: always()
++    needs: [pull_request, build]
++    runs-on: ubuntu-latest
++    steps:
++      - name: Check all matrix results
++        run: |
++          results="${{ needs.pull_request.result }} ${{ needs.build.result }}"
++          for r in $results; do
++            if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
++              echo "Job failed with result: $r"; exit 1
++            fi
++          done

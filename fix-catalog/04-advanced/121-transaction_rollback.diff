@@ -1,0 +1,29 @@
+# Aegis fix catalog #121 — Transaction rolled back with no retry/timeout
+#
+# Tier:       4 · Advanced
+# Category:   transaction_rollback (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | PrismaClientKnownRequestError: Transaction API error: Transaction already closed: A commit cannot be executed on an expired transaction.
+#   | transaction rolled back
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Enabled ORM transaction logging — unexpected rollbacks are hard to debug without seeing the exact query and transaction state
+#     - these env vars expose the full transaction lifecycle
+#
+# Apply:      git apply 04-advanced/121-transaction_rollback.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,6 +14,9 @@
+ env:
+   CI: 'true'
+   NODE_ENV: test
++  DEBUG: "prisma:query,prisma:info,typeorm:query,sequelize:sql"
++  TYPEORM_LOG_QUERIES_WITH_PARAMETERS: "true"
++  KNEX_DEBUG: "true"
+ jobs:
+   build:
+     runs-on: ubuntu-latest

@@ -1,0 +1,44 @@
+# Aegis fix catalog #082 — Type errors only caught at runtime
+#
+# Tier:       3 · Intermediate
+# Category:   type_mismatch
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | TypeError: value.toFixed is not a function
+#   | src/format.ts(8,10): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added tsc --noEmit step before build — TS2322/TS2345 type errors only caught at runtime
+#     - type checker now fails CI before the build step
+#   MODIFY tsconfig.json
+#     - Set TypeScript interop options — skipLibCheck skips type errors inside third-party .d.ts files and esModuleInterop/allowSyntheticDefaultImports fix default-import errors
+#     - strict mode is left untouched so real type errors in your code still fail the build
+#
+# Apply:      git apply 03-intermediate/082-type_mismatch.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -25,5 +25,7 @@
+           node-version: 20
+           cache: npm
+       - run: npm ci
++      - name: TypeScript type check
++        run: npx tsc --noEmit --skipLibCheck
+       - run: npm run build
+       - run: npm test
+diff --git a/tsconfig.json b/tsconfig.json
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -3,6 +3,9 @@
+     "target": "ES2022",
+     "module": "ESNext",
+     "strict": true,
+-    "outDir": "dist"
++    "outDir": "dist",
++    "skipLibCheck": true,
++    "esModuleInterop": true,
++    "allowSyntheticDefaultImports": true
+   }
+ }

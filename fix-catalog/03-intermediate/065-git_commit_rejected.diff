@@ -1,0 +1,28 @@
+# Aegis fix catalog #065 — Bot commit rejected by author policy
+#
+# Tier:       3 · Intermediate
+# Category:   git_commit_rejected (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | remote: error: GH013: Repository rule violations found for refs/heads/main.
+#   | remote: - Commits must have verified signatures.
+#   | ! [remote rejected] main -> main (push declined due to repository rule violations)
+#   | commit rejected by policy
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Changed git push to use HEAD ref or --force-with-lease — direct push to protected branch is rejected
+#     - automated branches bypass protection
+#     - --force-with-lease is safer than --force because it aborts if the remote has new commits
+#
+# Apply:      git apply 03-intermediate/065-git_commit_rejected.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -27,4 +27,4 @@
+       - run: npm ci
+       - run: |
+           git commit -am "chore: update generated files"
+-          git push
++          git push --force-with-lease

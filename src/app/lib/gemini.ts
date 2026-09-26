@@ -21,6 +21,8 @@ export interface AnalysisResult {
   confidence: number;
   fixes: Fix[];
   ranked_alternatives: RankedAlternative[];
+  /** Files the model returned but had only seen partially — refused, never applied. */
+  refusedPartial?: string[];
 }
 
 export async function analyzeAndFixWithGemini(
