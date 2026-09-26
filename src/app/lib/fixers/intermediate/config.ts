@@ -729,6 +729,8 @@ export function fixMissingVitestConfig(logs: string, files: Array<{ path: string
 export function fixMissingNvmrc(logs: string, files: Array<{ path: string; content: string }>): RuleFix[] {
   if (!/node.*version.*mismatch|required.*node.*version|engine.*node/i.test(logs)) return [];
   if (files.some(f => f.path === '.nvmrc' || f.path === '.node-version')) return [];
+  // Only a repair when CI actually reads the file (setup-node node-version-file: .nvmrc)
+  if (!files.some(f => /node-version-file:\s*['"]?\.?\/?\.nvmrc/.test(f.content))) return [];
   const versionMatch = logs.match(/node.*v?(\d+)\.(\d+)/i) ?? logs.match(/>=\s*v?(\d+)/);
   const major = versionMatch ? parseInt(versionMatch[1]) : 20;
   return [{
@@ -1134,7 +1136,7 @@ export function fixDuplicateDockerPort(files: Array<{ path: string; content: str
     if (!f.path.includes('docker-compose') && !f.path.includes('compose.')) continue;
     if (!isYAML(f.path)) continue;
     const fixed = f.content.replace(
-      /(ports:\s*\n)((?:\s+-\s+["']?[\d:]+["']?\s*\n)+)/g,
+      /(ports:[ \t]*\n)((?:[ \t]+-[ \t]+["']?[\d:]+["']?[ \t]*\n)+)/g,
       (_, header, body) => {
         const lines = body.split('\n').filter(Boolean);
         const seen = new Set<string>();

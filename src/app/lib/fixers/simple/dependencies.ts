@@ -445,7 +445,7 @@ export function fixNpmEnginesCheck(files: Array<{ path: string; content: string 
 
 /** Upgrade pip before installing requirements when version/build-backend conflicts occur. */
 export function fixPipUpgrade(logs: string, files: Array<{ path: string; content: string }>): RuleFix[] {
-  if (!/version.*conflict|Could not find a version|incompatible.*requires|ERROR.*ResolutionImpossible/i.test(logs)) return [];
+  if (!/version.*conflict|incompatible.*requires|ERROR.*ResolutionImpossible|Could not build wheels|requires a newer (?:pip|setuptools)/i.test(logs)) return [];
   if (!/pip/i.test(logs)) return [];
   const fixes: RuleFix[] = [];
   for (const f of files) {
@@ -462,7 +462,8 @@ export function fixPipUpgrade(logs: string, files: Array<{ path: string; content
 
 /** Add --legacy-peer-deps when npm reports ERESOLVE peer dependency conflicts. */
 export function fixPeerDepConflict(logs: string, files: Array<{ path: string; content: string }>): RuleFix[] {
-  if (!/peer dep|ERESOLVE|peer dependency conflict|incompatible peer/i.test(logs)) return [];
+  // ERESOLVE is npm's error code — case-sensitive, or it matches "packageResolve" in Node stack frames
+  if (!/peer dep|peer dependency conflict|incompatible peer/i.test(logs) && !/\bERESOLVE\b/.test(logs)) return [];
   const fixes: RuleFix[] = [];
   for (const f of files) {
     if (!isGitHubWorkflow(f.path) && !isGitLabCI(f.path)) continue;
@@ -478,7 +479,7 @@ export function fixPeerDepConflict(logs: string, files: Array<{ path: string; co
 
 /** Add npm overrides to package.json when a specific nested peer dep conflicts. */
 export function fixNpmOverrides(logs: string, files: Array<{ path: string; content: string }>): RuleFix[] {
-  if (!/ERESOLVE|peer dep|Conflicting peer/i.test(logs)) return [];
+  if (!/peer dep|Conflicting peer/i.test(logs) && !/\bERESOLVE\b/.test(logs)) return [];
   const pkgMatch = logs.match(/Conflicting peer dependency:\s*([a-z@][a-z0-9._-]*(?:\/[a-z0-9._-]*)?)@([^\s,]+)/i);
   if (!pkgMatch) return [];
   const [, pkg, version] = pkgMatch;

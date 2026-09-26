@@ -1,0 +1,11 @@
+# Aegis fix catalog #102 — Docker Hub anonymous pull rate limit
+#
+# Tier:       4 · Advanced
+# Category:   docker_rate_limit (auto-diagnosed from the log below)
+# Engine:     flaky check — re-runs the failed jobs, no code change
+#
+# CI log:
+#   | Error response from daemon: toomanyrequests: You have reached your pull rate limit. You may increase the limit by authenticating and upgrading: https://www.docker.com/increase-rate-limit
+#
+# How it is solved:
+#   Rate limits reset — the flaky check re-runs the job first. If it keeps happening, authenticate pulls with a Docker Hub token (a repo secret only the owner can create).

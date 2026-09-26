@@ -1,0 +1,38 @@
+# Aegis fix catalog #138 — Post-deploy health check fails immediately
+#
+# Tier:       4 · Advanced
+# Category:   health_check_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | health check failed: GET /health returned 503
+#   | Readiness probe failed: HTTP probe failed with statuscode: 503
+#
+# How it is solved:
+#   MODIFY k8s/deployment.yaml
+#     - Added readinessProbe (delay 15s) + livenessProbe (delay 30s) on port 3000 — prevents traffic routing before app is ready and auto-restarts unresponsive containers
+#
+# Apply:      git apply 04-advanced/138-health_check_failure.diff
+diff --git a/k8s/deployment.yaml b/k8s/deployment.yaml
+--- a/k8s/deployment.yaml
++++ b/k8s/deployment.yaml
+@@ -15,5 +15,19 @@
+       containers:
+         - name: app
+           image: ghcr.io/acme/app:latest
++          readinessProbe:
++            httpGet:
++              path: /health
++              port: 3000
++            initialDelaySeconds: 15
++            periodSeconds: 5
++            failureThreshold: 3
++          livenessProbe:
++            httpGet:
++              path: /health
++              port: 3000
++            initialDelaySeconds: 30
++            periodSeconds: 15
++            failureThreshold: 3
+           ports:
+             - containerPort: 3000

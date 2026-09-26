@@ -1,0 +1,31 @@
+# Aegis fix catalog #064 — Go modules not downloaded / toolchain missing
+#
+# Tier:       3 · Intermediate
+# Category:   go_build_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | go: downloading github.com/gin-gonic/gin v1.9.1
+#   | main.go:4:2: no required module provides package github.com/gin-gonic/gin; to add it:
+#   | 	go get github.com/gin-gonic/gin
+#   | go build failed
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added go mod download — without it Go cannot resolve imports on a fresh runner
+#     - go mod verify checks downloaded module checksums against go.sum
+#
+# Apply:      git apply 03-intermediate/064-go_build_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -20,5 +20,9 @@
+     timeout-minutes: 15
+     steps:
+       - uses: actions/checkout@v4
++      - name: Download Go modules
++        run: |
++          go mod download
++          go mod verify
+       - run: go build ./...
+       - run: go test ./...

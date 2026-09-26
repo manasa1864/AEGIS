@@ -1,0 +1,26 @@
+# Aegis fix catalog #108 — Container has no HEALTHCHECK
+#
+# Tier:       4 · Advanced
+# Category:   container_health_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | container app is unhealthy
+#   | health check failed after 3 retries
+#   | Error: container unhealthy — dependency failed to start
+#
+# How it is solved:
+#   MODIFY Dockerfile
+#     - Added HEALTHCHECK instruction to Dockerfile — container was reported unhealthy without one
+#
+# Apply:      git apply 04-advanced/108-container_health_failure.diff
+diff --git a/Dockerfile b/Dockerfile
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -4,3 +4,6 @@
+ RUN npm ci --omit=dev
+ EXPOSE 3000
+ CMD ["node", "server.js"]
++
++HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
++  CMD wget -qO- http://localhost:3000/health || exit 1

@@ -347,8 +347,8 @@ export function fixTestEnvironmentMisconfig(logs: string, files: Array<{ path: s
   if (!/test.*environment|NODE_ENV.*test|jest.*environment|Cannot find module.*test/i.test(logs)) return [];
   const fixes: RuleFix[] = [];
 
-  // Create .env.test if missing
-  if (!files.some(f => f.path === '.env.test' || f.path.endsWith('/.env.test'))) {
+  // Create .env.test only when the run actually looked for one
+  if (/\.env\.test\b/.test(logs) && !files.some(f => f.path === '.env.test' || f.path.endsWith('/.env.test'))) {
     const hasPrisma = files.some(f => f.content.includes('prisma'));
     const dbKey = hasPrisma ? 'DATABASE_URL' : 'TEST_DATABASE_URL';
     fixes.push({

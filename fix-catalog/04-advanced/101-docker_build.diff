@@ -1,0 +1,13 @@
+# Aegis fix catalog #101 — Unpinned base image / shell-form CMD
+#
+# Tier:       4 · Advanced
+# Category:   docker_build (auto-diagnosed from the log below)
+# Engine:     AI step (no deterministic rule applies)
+#
+# CI log:
+#   | #8 [3/4] RUN npm install
+#   | #8 ERROR: process "/bin/sh -c npm install" did not complete successfully: exit code: 1
+#   | ERROR: failed to solve: docker build failed (Dockerfile)
+#
+# How it is solved:
+#   "RUN npm install exited 1" hides the real error one level down (a failing postinstall, a missing build tool, a private registry). The AI step reads the full build log; rule fixes for the specific errors (npm ci without lockfile, unknown instructions, missing Dockerfile) apply when those errors appear.

@@ -1,0 +1,12 @@
+# Aegis fix catalog #091 — Parallel jobs racing on shared state
+#
+# Tier:       3 · Intermediate
+# Category:   parallel_sync_issue (auto-diagnosed from the log below)
+# Engine:     AI step (no deterministic rule applies)
+#
+# CI log:
+#   | Error: EEXIST: file already exists, mkdir '/tmp/test-db'
+#   | race condition between parallel jobs — parallel job sync failed
+#
+# How it is solved:
+#   Which shared resource the shards race on (a temp dir, a database, a port) is specific to the test code; isolating it needs the code, so this goes to the AI step.

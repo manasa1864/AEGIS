@@ -1,0 +1,12 @@
+# Aegis fix catalog #115 — AWS CLI with no credentials / region
+#
+# Tier:       4 · Advanced
+# Category:   aws_auth_failure (auto-diagnosed from the log below)
+# Engine:     reported to the repo owner
+#
+# CI log:
+#   | Unable to locate credentials. You can configure credentials by running "aws configure".
+#   | NoCredentialProviders: no valid providers in chain
+#
+# How it is solved:
+#   CI needs AWS credentials that only the account owner can create (an OIDC role or access-key secrets). Aegis reports this instead of committing a step that references secrets which do not exist yet.

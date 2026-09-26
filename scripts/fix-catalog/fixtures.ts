@@ -26,6 +26,11 @@ export interface CatalogEntry {
   log: string;
   /** Files added to / overriding the base repo. */
   files?: Files;
+  /** Base-repo files this scenario does not have. */
+  remove?: string[];
+  /** Scenarios the deterministic engine deliberately leaves alone — healed by another
+   *  strategy of the ladder, or needing the repo owner. They must produce no diff. */
+  resolution?: { strategy: 'rerun' | 'revert' | 'ai' | 'manual'; why: string };
 }
 
 export const TIERS: Record<CatalogEntry['tier'], { dir: string; label: string; blurb: string }> = {
@@ -108,7 +113,7 @@ const DOCKERFILE = 'FROM node\nWORKDIR /app\nCOPY . .\nRUN npm install\nEXPOSE 3
 /** A file as the engine's always-on rules leave it when there is NO failure —
  *  i.e. an already-hardened repo, so a scenario's diff shows only its own fix. */
 function hardened(path: string, content: string, category: ErrorCategory = 'unknown', extra: Files = []): string {
-  return applyRuleBasedFixes(category, '', [{ path, content }, ...extra]).find(f => f.path === path)?.content ?? content;
+  return applyRuleBasedFixes(category, '', [{ path, content }, ...extra], { hardening: true }).find(f => f.path === path)?.content ?? content;
 }
 const COMPOSE = `version: "3.8"
 services:
@@ -257,8 +262,8 @@ export const CATALOG: CatalogEntry[] = [
     log: 'npm ERR! code EINTEGRITY\nnpm ERR! sha512-abc integrity checksum failed when using sha512: wanted sha512-abc but got sha512-def. (4521 bytes)\nnpm ERR! A complete log of this run can be found in: corrupted lockfile',
   },
   {
-    category: 'python_deps', tier: 1, title: 'Python dependency resolution failure',
-    log: "ERROR: Could not find a version that satisfies the requirement numpy==1.19.0 (from -r requirements.txt (line 1))\nERROR: No matching distribution found for numpy==1.19.0\nError: Process completed with exit code 1. pip install failed",
+    category: 'python_deps', tier: 1, title: "Pinned Python package does not support the runner's Python",
+    log: "ERROR: Ignored the following versions that require a different python version: 1.19.0 Requires-Python >=3.6,<3.10\nERROR: Could not find a version that satisfies the requirement numpy==1.19.0 (from -r requirements.txt (line 1))\nERROR: No matching distribution found for numpy==1.19.0\nError: Process completed with exit code 1. pip install failed",
     files: [WF(PY_WORKFLOW), { path: 'requirements.txt', content: 'numpy==1.19.0\nrequests\n' }],
   },
   {
@@ -290,9 +295,9 @@ export const CATALOG: CatalogEntry[] = [
 `))],
   },
   {
-    category: 'missing_file', tier: 1, title: 'Build references a Dockerfile that does not exist',
+    category: 'missing_file', tier: 1, title: 'docker build looks for ./Dockerfile but it lives in a subfolder',
     log: 'ERROR: failed to solve: failed to read dockerfile: open Dockerfile: no such file or directory',
-    files: [WF(DOCKER_WORKFLOW)],
+    files: [WF(DOCKER_WORKFLOW), { path: 'docker/Dockerfile', content: DOCKERFILE_OK }],
   },
   {
     category: 'missing_config_file', tier: 1, title: 'Tool config file missing from the repo',
@@ -320,6 +325,7 @@ export const CATALOG: CatalogEntry[] = [
   },
   {
     category: 'concurrency_issue', tier: 1, title: 'Runs cancelling each other via concurrency group',
+    resolution: { strategy: 'rerun', why: 'A newer run superseded this one — nothing in the repo is broken. The flaky check re-runs the cancelled jobs; no code change is committed.' },
     log: 'Canceling since a higher priority waiting request for \'ci-refs/heads/main\' exists\nThis run has been cancelled by concurrency group',
     files: [WF(BASE_WORKFLOW.replace('concurrency:\n  group: ci-${{ github.ref }}\n  cancel-in-progress: true\n', ''))],
   },
@@ -394,6 +400,60 @@ export const CATALOG: CatalogEntry[] = [
     files: [{ path: 'src/routes/users.ts', content: "import { Router, type Request } from 'express';\nimport { json, z } from './schema';\n\nexport function listUsers(req: Request) {\n  return json(req.query);\n}\n" }],
   },
   {
+    id: 'code-eslint-mechanical', category: 'lint_failure', tier: 2, title: 'ESLint rules with one mechanical fix (eqeqeq, use-isnan, no-console, no-var)',
+    log: "/home/runner/work/app/app/src/inventory.ts\n  1:1   error  Unexpected var, use let or const instead  no-var\n  5:9   error  Expected '===' and instead saw '=='  eqeqeq\n  8:7   error  Use the isNaN function to compare with NaN  use-isnan\n  9:5   error  Unexpected console statement  no-console\n\n✖ 4 problems (4 errors, 0 warnings)",
+    files: [{ path: 'src/inventory.ts', content: "var threshold = 5;\n\nexport function adjust(rows: Array<{ qty: number }>, raw: string) {\n  const delta = Number(raw);\n  if (rows.length == 0) return null;\n  if (delta < 0) return threshold;\n  const next = rows[0].qty + delta;\n  if (next == NaN) {\n    console.log('bad delta ' + raw);\n    return null;\n  }\n  return next;\n}\n" }],
+  },
+  {
+    id: 'code-python-lint', category: 'lint_failure', tier: 2, title: 'ruff/flake8 rules with a standard rewrite (E711, E722, F541, B006)',
+    log: 'worker/report.py:4:21: B006 Do not use mutable data structures for argument defaults\nworker/report.py:6:14: F541 [*] f-string without any placeholders\nworker/report.py:9:14: E711 Comparison to `None` should be `cond is None`\nworker/report.py:15:5: E722 Do not use bare `except`\nFound 4 errors.',
+    files: [{ path: 'worker/report.py', content: 'import json\n\n\ndef build_report(orders, out=[]):\n    \'\'\'Summarise orders.\'\'\'\n    header = f"customer,total"\n    lines = [header]\n    for o in orders:\n        if o == None:\n            continue\n        lines.append(json.dumps(o))\n    except_ok = True\n    try:\n        out.append(lines)\n    except:\n        except_ok = False\n    return lines, except_ok\n' }],
+  },
+  {
+    id: 'code-ts-missing-export', category: 'compilation_failure', tier: 2, title: 'Imported name is declared but never exported (TS2459)',
+    log: "test/orders.test.ts(2,10): error TS2459: Module '\"../src/index\"' declares 'app' locally, but it is not exported.",
+    files: [
+      { path: 'src/index.ts', content: "import express from 'express';\n\nconst app = express();\napp.get('/health', (_req, res) => res.send('ok'));\n\napp.listen(3000);\n" },
+      { path: 'test/orders.test.ts', content: "import request from 'supertest';\nimport { app } from '../src/index';\n\nit('is healthy', async () => {\n  expect((await request(app).get('/health')).status).toBe(200);\n});\n" },
+    ],
+  },
+  {
+    id: 'code-python-moved-module', category: 'python_deps', tier: 2, title: 'Import of a module that moved inside the local package',
+    log: "ImportError while importing test module '/home/runner/work/app/app/services/worker/tests/test_cleanup.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\ntests/test_cleanup.py:1: in <module>\n    from worker.cleanup import job_token\nE   ModuleNotFoundError: No module named 'worker.cleanup'",
+    files: [
+      { path: 'services/worker/worker/__init__.py', content: '' },
+      { path: 'services/worker/worker/jobs/__init__.py', content: '' },
+      { path: 'services/worker/worker/jobs/cleanup.py', content: 'import secrets\n\n\ndef job_token():\n    return secrets.token_hex(8)\n' },
+      { path: 'services/worker/tests/test_cleanup.py', content: 'from worker.cleanup import job_token\n\n\ndef test_token_length():\n    assert len(job_token()) == 16\n' },
+    ],
+  },
+  {
+    id: 'code-loop-off-by-one', category: 'null_reference', tier: 2, title: 'Loop reads one past the end of an array (i <= arr.length)',
+    log: "TypeError: Cannot read properties of undefined (reading 'qty')\n    at calculateTotal (/home/runner/work/app/app/src/pricing.ts:4:28)\n    at Object.<anonymous> (/home/runner/work/app/app/test/pricing.test.ts:5:12)",
+    files: [{ path: 'src/pricing.ts', content: 'export function calculateTotal(items: { qty: number; unitPrice: number }[]): number {\n  let subtotal = 0;\n  for (let i = 0; i <= items.length; i++) {\n    subtotal += items[i].qty * items[i].unitPrice;\n  }\n  return subtotal;\n}\n' }],
+  },
+  {
+    id: 'code-pyyaml-loader', category: 'python_deps', tier: 2, title: 'PyYAML 6 requires an explicit Loader',
+    log: 'Traceback (most recent call last):\n  File "/home/runner/work/app/app/worker/main.py", line 6, in load_config\n    cfg = yaml.load(f)\nTypeError: load() missing 1 required positional argument: \'Loader\'',
+    files: [{ path: 'worker/main.py', content: 'import yaml\n\n\ndef load_config(path):\n    with open(path) as f:\n        cfg = yaml.load(f)\n    return cfg\n' }],
+  },
+  {
+    id: 'code-missing-npm-package-subdir', category: 'missing_dependency', tier: 2, title: 'Monorepo: missing package declared in the package that imports it',
+    log: "src/routes/orders.ts(2,22): error TS2307: Cannot find module 'uuid' or its corresponding type declarations.",
+    files: [
+      { path: 'services/api/package.json', content: JSON.stringify({ name: 'api', private: true, dependencies: { express: '^4.21.2' } }, null, 2) + '\n' },
+      { path: 'services/api/src/routes/orders.ts', content: "import { Router } from 'express';\nimport { v4 as uuid } from 'uuid';\n\nexport const ordersRouter = Router();\nordersRouter.post('/', (_req, res) => { res.json({ id: uuid() }); });\n" },
+    ],
+  },
+  {
+    id: 'code-npm-variant-import', category: 'missing_dependency', tier: 2, title: 'Config imports a package variant the project does not use',
+    log: "failed to load config from /home/runner/work/app/app/web/vite.config.ts\nerror during build:\nError [ERR_MODULE_NOT_FOUND]: Cannot find package '@vitejs/plugin-react' imported from /home/runner/work/app/app/web/vite.config.ts",
+    files: [
+      { path: 'web/package.json', content: JSON.stringify({ name: 'web', private: true, type: 'module', devDependencies: { '@vitejs/plugin-react-swc': '^3.6.0', vite: '^5.2.0' } }, null, 2) + '\n' },
+      { path: 'web/vite.config.ts', content: "import { defineConfig } from 'vite';\nimport react from '@vitejs/plugin-react';\n\nexport default defineConfig({ plugins: [react()] });\n" },
+    ],
+  },
+  {
     id: 'code-prefer-const', category: 'lint_failure', tier: 2, title: 'ESLint prefer-const',
     log: "/home/runner/work/app/app/src/config.ts\n  3:5  error  'port' is never reassigned. Use 'const' instead  prefer-const\n\n✖ 1 problem (1 error, 0 warnings)",
     files: [{ path: 'src/config.ts', content: "export function config() {\n  const host = process.env.HOST ?? 'localhost';\n  let port = Number(process.env.PORT ?? 3000);\n  return { host, port };\n}\n" }],
@@ -458,6 +518,7 @@ export const CATALOG: CatalogEntry[] = [
   },
   {
     category: 'coverage_failure', tier: 3, title: 'Coverage threshold not met',
+    resolution: { strategy: 'ai', why: 'The honest fix is more tests for the uncovered code, which the AI step can draft from the coverage report. Lowering the threshold would only hide the gap, so the rule engine never does it.' },
     log: 'Jest: "global" coverage threshold for lines (80%) not met: 71.4%\nERROR: Coverage for lines (71.4%) does not meet global threshold (80%)\ncoverage threshold not met',
     files: [pkg({ scripts: { ...PKG.scripts, test: 'jest --coverage' }, devDependencies: { jest: '^29.7.0' } }), { path: 'jest.config.js', content: "module.exports = {\n  testEnvironment: 'node',\n  coverageThreshold: { global: { lines: 80 } },\n};\n" }],
   },
@@ -531,6 +592,7 @@ export const CATALOG: CatalogEntry[] = [
   },
   {
     category: 'maven_build_failure', tier: 3, title: 'Maven dependency resolution without JDK/cache',
+    resolution: { strategy: 'ai', why: 'An unresolvable Maven dependency is a wrong coordinate, a missing repository or registry auth — which one depends on the POM and the org. The AI step gets the log and pom.xml; its fix goes through the same validator.' },
     log: '[ERROR] Failed to execute goal on project app: Could not resolve dependencies for project com.acme:app:jar:1.0: maven\n[INFO] BUILD FAILURE — maven',
     files: [WF(wfSteps(`      - uses: actions/checkout@v4
       - run: mvn -B package
@@ -604,14 +666,14 @@ ${NODE_STEPS.replace('      - uses: actions/checkout@v4\n', '')}`))],
     files: [WF(BASE_WORKFLOW.replace('branches: [main]', 'branches: [master]'))],
   },
   {
-    category: 'artifact_failure', tier: 3, title: 'Artifact upload finds no files',
+    category: 'artifact_failure', tier: 3, title: 'Artifact upload path differs from the build output directory',
     log: 'Warning: No files were found with the provided path: dist/. No artifacts will be uploaded.\nError: artifact not found',
     files: [WF(wfSteps(`${NODE_STEPS}      - run: npm run build
       - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
-`))],
+`)), { path: 'tsconfig.json', content: JSON.stringify({ compilerOptions: { outDir: 'lib', strict: true } }, null, 2) + '\n' }],
   },
   {
     category: 'artifact_retention', tier: 3, title: 'Artifact storage quota / retention',
@@ -664,15 +726,11 @@ jobs:
 `))],
   },
   {
-    category: 'cache_failure', tier: 3, title: 'node_modules cache with no restore fallback',
-    log: 'Cache not found for input keys: Linux-node-modules-8f14e45\nWarning: Failed to restore cache — cache miss on every run',
-    files: [WF(wfSteps(`      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: \${{ runner.os }}-node-modules-\${{ hashFiles('package-lock.json') }}
-      - run: npm ci
-`))],
+    category: 'cache_failure', tier: 3, title: 'setup-node dependency cache with no lockfile committed',
+    log: 'Error: Some specified paths were not resolved, unable to cache dependencies.',
+    files: [WF(wfSteps(`${NODE_STEPS}      - run: npm test
+`).replace('      - run: npm ci\n', '      - run: npm install\n'))],
+    remove: ['package-lock.json'],
   },
   {
     category: 'cache_restore_failure', tier: 3, title: 'Cache restore fails with no fallback keys',
@@ -691,8 +749,8 @@ jobs:
     files: [WF(BASE_WORKFLOW.replace('runs-on: ubuntu-latest', 'runs-on: ubuntu-lastest'))],
   },
   {
-    category: 'matrix_failure', tier: 3, title: 'One matrix leg cancels all others',
-    log: 'The strategy configuration was canceled because "build.node_18" failed\nmatrix job cancelled — fail-fast cancelled remaining jobs',
+    category: 'matrix_failure', tier: 3, title: 'Matrix tests a Node version the package does not support',
+    log: 'npm ERR! code EBADENGINE\nnpm ERR! engine Unsupported engine\nnpm ERR! notsup Required: {"node":">=20"}\nnpm ERR! notsup Actual:   {"npm":"10.8.2","node":"v18.20.4"}\nThe strategy configuration was canceled because "build.node_18" failed',
     files: [WF(wfSteps(`      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -741,6 +799,7 @@ jobs:
   },
   {
     category: 'parallel_sync_issue', tier: 3, title: 'Parallel jobs racing on shared state',
+    resolution: { strategy: 'ai', why: 'Which shared resource the shards race on (a temp dir, a database, a port) is specific to the test code; isolating it needs the code, so this goes to the AI step.' },
     log: 'Error: EEXIST: file already exists, mkdir \'/tmp/test-db\'\nrace condition between parallel jobs — parallel job sync failed',
     files: [WF(wfSteps(`${NODE_STEPS}      - run: npm test -- --shard=\${{ matrix.shard }}/3
 `, `    strategy:
@@ -799,19 +858,21 @@ jobs:
   },
   {
     category: 'docker_build', tier: 4, title: 'Unpinned base image / shell-form CMD',
+    resolution: { strategy: 'ai', why: '"RUN npm install exited 1" hides the real error one level down (a failing postinstall, a missing build tool, a private registry). The AI step reads the full build log; rule fixes for the specific errors (npm ci without lockfile, unknown instructions, missing Dockerfile) apply when those errors appear.' },
     log: '#8 [3/4] RUN npm install\n#8 ERROR: process "/bin/sh -c npm install" did not complete successfully: exit code: 1\nERROR: failed to solve: docker build failed (Dockerfile)',
     files: [{ path: 'Dockerfile', content: DOCKERFILE }],
   },
   {
     category: 'docker_rate_limit', tier: 4, title: 'Docker Hub anonymous pull rate limit',
+    resolution: { strategy: 'rerun', why: 'Rate limits reset — the flaky check re-runs the job first. If it keeps happening, authenticate pulls with a Docker Hub token (a repo secret only the owner can create).' },
     log: 'Error response from daemon: toomanyrequests: You have reached your pull rate limit. You may increase the limit by authenticating and upgrading: https://www.docker.com/increase-rate-limit',
     files: [WF(wfSteps(`${NODE_STEPS}      - run: docker build -t app .
 `)), { path: 'Dockerfile', content: DOCKERFILE_OK }],
   },
   {
-    category: 'dockerfile_syntax', tier: 4, title: 'Invalid Dockerfile instructions',
+    category: 'dockerfile_syntax', tier: 4, title: 'Dockerfile instruction glued to its arguments',
     log: 'ERROR: failed to solve: dockerfile parse error on line 5: unknown instruction: CMD["node",',
-    files: [{ path: 'Dockerfile', content: 'FROM node:20-alpine\nWORKDIR app\nADD . .\nRUN npm ci\nCMD node server.js\n' }],
+    files: [{ path: 'Dockerfile', content: 'FROM node:20-alpine\nWORKDIR /app\nCOPY . .\nRUN npm ci\nCMD["node", "server.js"]\n' }],
   },
   {
     category: 'missing_docker_layer', tier: 4, title: 'Docker builds never reuse cached layers',
@@ -824,6 +885,7 @@ jobs:
   },
   {
     category: 'image_pull_failure', tier: 4, title: 'Service image pull denied / not found',
+    resolution: { strategy: 'rerun', why: 'Registry pull failures are often transient, so the flaky check re-runs first. A wrong image name or a private image needing credentials then goes to the AI step / the repo owner.' },
     log: 'Error response from daemon: pull access denied for acme/api, repository does not exist or may require \'docker login\'\nmanifest unknown docker',
     files: [WF(wfSteps(NODE_STEPS + '      - run: npm test\n', `    services:
       api:
@@ -858,6 +920,7 @@ jobs:
   },
   {
     category: 'invalid_token', tier: 4, title: 'Expired / invalid API token',
+    resolution: { strategy: 'manual', why: 'An expired or revoked token has to be re-issued and saved as a repo secret by its owner. Making the step non-blocking would hide the failure, so Aegis reports it instead.' },
     log: 'HttpError: Bad credentials\n  status: 401 Unauthorized\ntoken expired or revoked',
     files: [WF(wfSteps(`${NODE_STEPS}      - run: gh release create v1.0.0
         env:
@@ -894,12 +957,14 @@ jobs:
   },
   {
     category: 'aws_auth_failure', tier: 4, title: 'AWS CLI with no credentials / region',
+    resolution: { strategy: 'manual', why: 'CI needs AWS credentials that only the account owner can create (an OIDC role or access-key secrets). Aegis reports this instead of committing a step that references secrets which do not exist yet.' },
     log: 'Unable to locate credentials. You can configure credentials by running "aws configure".\nNoCredentialProviders: no valid providers in chain',
     files: [WF(wfSteps(`${NODE_STEPS}      - run: aws s3 sync dist/ s3://acme-app
 `))],
   },
   {
     category: 'gcp_auth_failure', tier: 4, title: 'gcloud without authentication',
+    resolution: { strategy: 'manual', why: 'CI needs Google Cloud credentials (Workload Identity Federation or a service-account key secret) that only the project owner can create.' },
     log: 'ERROR: (gcloud.run.deploy) You do not currently have an active account selected.\nGOOGLE_APPLICATION_CREDENTIALS is not set — gcloud auth failed',
     files: [WF(wfSteps(`${NODE_STEPS}      - run: gcloud run deploy app --source . --region us-central1
 `))],
@@ -971,6 +1036,7 @@ jobs:
   },
   {
     category: 'schema_validation', tier: 4, title: 'OpenAPI lint gate blocks every build',
+    resolution: { strategy: 'ai', why: 'The spec is genuinely invalid (an operation with no success response). Writing the missing response needs API knowledge, so the AI step drafts it; the gate itself is never switched off.' },
     log: 'openapi.yaml\n  12:7  error  oas3-schema  "responses" property must have required property "200".\nschema validation failed — JSON Schema error',
     files: [WF(wfSteps(`${NODE_STEPS}      - run: npx @stoplight/spectral-cli lint openapi.yaml
 `)), { path: 'openapi.yaml', content: 'openapi: 3.0.3\ninfo:\n  title: App\n  version: 1.0.0\npaths:\n  /users:\n    get:\n      responses: {}\n' }],
@@ -1040,23 +1106,26 @@ jobs:
   },
   {
     category: 'load_balancer_issue', tier: 4, title: 'Load balancer marks targets unhealthy',
+    resolution: { strategy: 'ai', why: 'An unhealthy target is a wrong health-check path/port or an app that does not start; which one depends on the service code and infra, so the AI step investigates with the logs and manifests.' },
     log: 'ALB target group health check failing: 503 Service Unavailable from load balancer\nTarget.ResponseCodeMismatch',
     files: DEPLOY_REPO,
   },
   {
     category: 'deploy_failure', tier: 4, title: 'Deployment fails with no rollback',
+    resolution: { strategy: 'ai', why: 'A progress-deadline timeout means the new pods never became ready — a crash, a failing probe or missing config in the release itself. The AI step reads the rollout events and manifests; rule fixes apply when the error names a manifest problem (selector/labels, missing revision history).' },
     log: 'error: deployment "app" exceeded its progress deadline\nDeployment failed — Failed to deploy revision 42',
     files: [WF(DEPLOY_WORKFLOW), { path: 'k8s/deployment.yaml', content: K8S_DEPLOYMENT }],
   },
   {
     category: 'failed_production_deploy', tier: 4, title: 'Production deploy with no gate or guard',
+    resolution: { strategy: 'revert', why: 'The release crashed on boot, so the last green commit is the safe state. The ladder validates candidate reverts on CI in parallel and opens a PR for the first one that goes green.' },
     log: 'production deploy failed: release v2.3.0 crashed on boot\nError: deploy to production error — rollout aborted',
     files: [WF(DEPLOY_WORKFLOW), { path: 'k8s/deployment.yaml', content: K8S_DEPLOYMENT }],
   },
   {
-    category: 'rollback_failure', tier: 4, title: 'Rollback itself fails',
+    category: 'rollback_failure', tier: 4, title: 'Rollback impossible — the Deployment keeps no revision history',
     log: 'error: no rollout history found for deployment "app"\nrollback failed — failed to rollback to revision 41',
-    files: [WF(DEPLOY_WORKFLOW), { path: 'k8s/deployment.yaml', content: K8S_DEPLOYMENT }],
+    files: [WF(DEPLOY_WORKFLOW), { path: 'k8s/deployment.yaml', content: K8S_DEPLOYMENT.replace(/^spec:\n/m, 'spec:\n  revisionHistoryLimit: 0\n') }],
   },
   {
     category: 'blue_green_conflict', tier: 4, title: 'Blue/green traffic switch conflict',
@@ -1065,7 +1134,50 @@ jobs:
   },
   {
     category: 'canary_mismatch', tier: 4, title: 'Canary serving a different version',
+    resolution: { strategy: 'revert', why: 'The canary is failing its error-rate check, which is a regression in the new version, not a config mistake. Reverting to the last green build restores the stable version while the regression is investigated.' },
     log: 'canary version mismatch: canary=v2.4.0 stable=v2.3.1 — canary deploy error\nerror rate 7.2% exceeds threshold 1%',
     files: [WF(DEPLOY_WORKFLOW), { path: 'k8s/deployment.yaml', content: K8S_DEPLOYMENT }],
+  },
+  {
+    id: 'cron-out-of-range', category: 'invalid_trigger', tier: 1, title: 'Scheduled workflow with an out-of-range cron field',
+    log: 'Invalid workflow file: .github/workflows/nightly.yml#L5\nThe workflow is not valid. .github/workflows/nightly.yml (Line: 5, Col: 13): Invalid cron expression: hour 25 out of range',
+    files: [{ path: '.github/workflows/nightly.yml', content: 'name: Nightly\n\non:\n  schedule:\n    - cron: "0 25 * * *"\n\njobs:\n  smoke:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm test\n' }],
+  },
+  {
+    id: 'pip-unpublished-version', category: 'python_deps', tier: 1, title: 'requirements.txt pins a version that was never published',
+    log: 'ERROR: Could not find a version that satisfies the requirement redis==9.9.9 (from versions: 4.6.0, 5.0.0, 5.0.1, 5.1.0b1, 5.1.0)\nERROR: No matching distribution found for redis==9.9.9',
+    files: [{ path: 'requirements.txt', content: 'PyYAML==6.0.1\nredis==9.9.9\npytest==8.3.2\n' }],
+  },
+  {
+    id: 'node-engines-job-dir', category: 'node_version', tier: 1, title: "Monorepo job runs a Node version below its package's engines",
+    log: 'npm ERR! code EBADENGINE\nnpm ERR! engine Unsupported engine\nnpm ERR! notsup Not compatible with your version of node/npm: api@1.4.2\nnpm ERR! notsup Required: {"node":">=18"}\nnpm ERR! notsup Actual:   {"npm":"8.19.4","node":"v16.20.2"}',
+    files: [
+      WF(`name: CI\non:\n  push:\n    branches: [main]\npermissions:\n  contents: read\njobs:\n  web:\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        working-directory: web\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 20\n      - run: npm install\n  test-api:\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        working-directory: services/api\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 16\n      - run: npm install\n      - run: npm test\n`),
+      { path: 'services/api/package.json', content: JSON.stringify({ name: 'api', version: '1.4.2', private: true, engines: { node: '>=18' } }, null, 2) + '\n' },
+      { path: 'services/api/.npmrc', content: 'engine-strict=true\n' },
+    ],
+  },
+  {
+    id: 'npm-audit-vulnerable', category: 'dependency_vulnerability', tier: 3, title: 'npm audit gate fails on vulnerable direct dependencies',
+    log: '# npm audit report\n\nbody-parser  <1.20.3\nSeverity: high\nbody-parser vulnerable to denial of service when url encoding is enabled - https://github.com/advisories/GHSA-qwcr-r2fm-qrc7\nfix available via `npm audit fix`\nnode_modules/body-parser\n\njsonwebtoken  <=8.5.1\nSeverity: high\njsonwebtoken unrestricted key type could lead to legacy keys usage - https://github.com/advisories/GHSA-8cf7-32gw-wr33\nfix available via `npm audit fix --force`\nWill install jsonwebtoken@9.0.2, which is a breaking change\nnode_modules/jsonwebtoken\n\n2 high severity vulnerabilities',
+    files: [pkg({ dependencies: { 'body-parser': '1.18.3', express: '^4.19.2', jsonwebtoken: '8.5.0' } })],
+  },
+  {
+    id: 'jest-env-not-installed', category: 'test_failure', tier: 3, title: "Jest 28+ with testEnvironment 'jsdom' that is not installed",
+    log: 'Test environment jest-environment-jsdom cannot be found. Make sure the testEnvironment configuration option points to an existing node module.',
+    files: [
+      pkg({ scripts: { test: 'jest' }, devDependencies: { jest: '^29.7.0', 'ts-jest': '^29.1.2', typescript: '^5.4.0' } }),
+      { path: 'jest.config.js', content: "module.exports = {\n  preset: 'ts-jest',\n  testEnvironment: 'jsdom',\n};\n" },
+    ],
+  },
+  {
+    id: 'compose-port-collision', category: 'port_conflict', tier: 4, title: 'Two compose services publish the same host port',
+    log: 'Error response from daemon: driver failed programming external connectivity on endpoint app-cache-1: Bind for 0.0.0.0:3000 failed: port is already allocated',
+    files: [{ path: 'docker-compose.yml', content: 'services:\n  api:\n    build: .\n    ports:\n      - "3000:3000"\n  cache:\n    image: redis:7\n    ports:\n      - "3000:6379"\n' }],
+  },
+  {
+    id: 'k8s-selector-mismatch', category: 'deploy_failure', tier: 4, title: 'Deployment selector does not match its pod template labels',
+    log: 'The Deployment "api" is invalid: spec.template.metadata.labels: Invalid value: map[string]string{"app":"shop"}: `selector` does not match template `labels`',
+    files: [WF(DEPLOY_WORKFLOW), { path: 'k8s/deployment.yaml', content: 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: api\n  template:\n    metadata:\n      labels:\n        app: shop\n    spec:\n      containers:\n        - name: api\n          image: ghcr.io/acme/api:1.4.2\n' }],
   },
 ];

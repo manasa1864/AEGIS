@@ -1,0 +1,12 @@
+# Aegis fix catalog #068 — Maven dependency resolution without JDK/cache
+#
+# Tier:       3 · Intermediate
+# Category:   maven_build_failure (auto-diagnosed from the log below)
+# Engine:     AI step (no deterministic rule applies)
+#
+# CI log:
+#   | [ERROR] Failed to execute goal on project app: Could not resolve dependencies for project com.acme:app:jar:1.0: maven
+#   | [INFO] BUILD FAILURE — maven
+#
+# How it is solved:
+#   An unresolvable Maven dependency is a wrong coordinate, a missing repository or registry auth — which one depends on the POM and the org. The AI step gets the log and pom.xml; its fix goes through the same validator.

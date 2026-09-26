@@ -1,0 +1,35 @@
+# Aegis fix catalog #107 — Container starts before its dependencies
+#
+# Tier:       4 · Advanced
+# Category:   container_startup (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | app-1  | Error: connect ECONNREFUSED 172.18.0.2:5432
+#   | app-1 exited with code 1
+#   | container did not start — container health unhealthy
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added docker-compose up/down around integration tests — ECONNREFUSED
+#     - services start before tests and always tear down after
+#
+# Apply:      git apply 04-advanced/107-container_startup.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -26,4 +26,13 @@
+           cache: npm
+       - run: npm ci
+       - run: npm run build
++      - name: Start integration test services
++        run: |
++          docker-compose -f docker-compose.yml up -d
++          sleep 15
++          docker-compose ps
+       - run: npm test
++
++      - name: Stop integration test services
++        if: always()
++        run: docker-compose -f docker-compose.yml down --volumes
+\ No newline at end of file

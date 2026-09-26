@@ -140,6 +140,7 @@ export type ErrorCategory =
   | 'unsupported_config_param'// Unsupported or unknown config parameter
   | 'duplicate_config_key'    // Duplicate key in config file
   | 'env_mapping_error'       // Environment variable mapping or injection error
+  | 'dependency_vulnerability'// Security audit gate (npm audit, pip-audit) found vulnerable dependencies
   | 'unknown';
 
 export interface ErrorDiagnosis {
@@ -839,6 +840,12 @@ const INSTRUCTIONS: Record<ErrorCategory, string> = {
     'Secrets must be explicitly mapped: `MY_SECRET: ${{ secrets.MY_SECRET }}`. ' +
     'For composite actions: pass env vars through inputs: since composite steps inherit a limited env.',
 
+  dependency_vulnerability:
+    'A dependency audit gate (npm audit / pip-audit / safety) failed on known advisories. ' +
+    'Upgrade each vulnerable DIRECT dependency to its first patched release (the audit output names it); ' +
+    'prefer the same major version, and call out any major upgrade as potentially breaking. ' +
+    'Never lower the audit level or add continue-on-error to hide the findings.',
+
   unknown:
     'Analyse all provided files. Look for version mismatches, missing commands, ' +
     'wrong environment setup, or misconfigured steps. ' +
@@ -1050,6 +1057,7 @@ const PATTERNS: Array<{
     patterns: [
       /<<<<<<< /i, /CONFLICT.*Merge conflict/i,
       /Automatic merge failed/i, /fix conflicts and then commit/i,
+      /\bTS1185\b/, /Merge conflict marker encountered/i,
     ],
     relevantFiles: [],
     description: 'Git merge conflict markers in committed files',
@@ -1104,6 +1112,7 @@ const PATTERNS: Array<{
     patterns: [
       /cache.*miss/i, /Failed to restore cache/i,
       /cache.*not.*found/i, /Restore cache failed/i,
+      /Some specified paths were not resolved, unable to cache dependencies/i, /Dependencies lock file is not found/i,
     ],
     relevantFiles: ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'],
     description: 'Cache restore or save failure',
@@ -1132,6 +1141,8 @@ const PATTERNS: Array<{
     patterns: [
       /cannot find module/i, /module not found/i, /ENOENT.*node_modules/i,
       /peer dep/i, /Cannot resolve/i, /failed to install/i, /unresolved dep/i,
+      /Cannot find package '/i, /ERR_MODULE_NOT_FOUND/, /\bERESOLVE\b/, /\bETARGET\b/,
+      /No matching version found for/i, /Failed to resolve import/i,
     ],
     relevantFiles: ['package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'],
     description: 'Missing or broken npm/yarn dependency',
@@ -1141,8 +1152,9 @@ const PATTERNS: Array<{
   {
     category: 'node_version',
     patterns: [
-      /node.*not.*found/i, /nvmrc/i, /unsupported.*engine/i,
-      /no.*matching.*version.*found/i, /ENODEVER/i, /required.*node.*version/i,
+      /node.*not.*found/i, /nvmrc/i, /unsupported.*engine/i, /\bEBADENGINE\b/,
+      /The engine "node" is incompatible/i, /Unable to find Node version/i,
+      /ENODEVER/i, /required.*node.*version/i,
     ],
     relevantFiles: ['.nvmrc', '.node-version', 'package.json'],
     description: 'Node.js version unavailable or unsupported',
@@ -1165,6 +1177,9 @@ const PATTERNS: Array<{
     patterns: [
       /pip install/i, /requirements\.txt/i, /ModuleNotFoundError/i,
       /No module named/i, /ImportError/i,
+      /No matching distribution found for/i, /Could not find a version that satisfies the requirement/i,
+      /Failed building wheel for/i, /metadata-generation-failed/i, /Could not open requirements file/i,
+      /missing 1 required positional argument: 'Loader'/,
     ],
     relevantFiles: ['requirements.txt', 'requirements-dev.txt', 'pyproject.toml', 'Pipfile'],
     description: 'Python dependency or version issue',
@@ -1174,7 +1189,7 @@ const PATTERNS: Array<{
   {
     category: 'yaml_syntax',
     patterns: [
-      /yaml.*syntax/i, /invalid.*workflow/i, /unexpected.*mapping/i,
+      /yaml.*syntax/i, /invalid.*workflow/i, /unexpected.*mapping/i, /workflow file is invalid/i,
       /mapping.*values.*not.*allowed/i, /did not find expected/i,
     ],
     relevantFiles: [],
@@ -1209,6 +1224,7 @@ const PATTERNS: Array<{
     patterns: [
       /Deployment.*failed/i, /Failed to deploy/i,
       /rollout.*failed/i, /kubectl.*error/i,
+      /`selector` does not match template `labels`/i, /field is immutable/i,
       /502 Bad Gateway.*deploy/i, /health check.*failed.*deploy/i,
     ],
     relevantFiles: [],
@@ -1230,7 +1246,7 @@ const PATTERNS: Array<{
   {
     category: 'api_timeout',
     patterns: [
-      /ETIMEDOUT/i, /ECONNRESET/i, /ENOTFOUND/i,
+      /\bETIMEDOUT\b/, /\bECONNRESET\b/, /\bENOTFOUND\b/,
       /connection timed out/i, /network timeout/i, /request timeout/i,
     ],
     relevantFiles: [],
@@ -2194,6 +2210,17 @@ const PATTERNS: Array<{
     ],
     relevantFiles: ['.github/workflows/', '.gitlab-ci.yml'],
     description: 'Duplicate key in configuration file',
+  },
+
+  // ── Dependency security audit ────────────────────────────────────────────
+  {
+    category: 'dependency_vulnerability',
+    patterns: [
+      /found \d+ (?:\w+ severity )?vulnerabilit/i, /\d+ vulnerabilit(?:y|ies) \(/i, /# npm audit report/i,
+      /Found \d+ known vulnerabilit/i, /pip-audit/i, /vulnerabilities? found.*safety/i,
+    ],
+    relevantFiles: ['package.json', 'package-lock.json', 'requirements.txt', 'pyproject.toml'],
+    description: 'Dependency audit found known-vulnerable packages',
   },
 
   // ── Environment variable mapping error ───────────────────────────────────

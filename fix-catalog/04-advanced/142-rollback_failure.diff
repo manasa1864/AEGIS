@@ -1,0 +1,27 @@
+# Aegis fix catalog #142 — Rollback impossible — the Deployment keeps no revision history
+#
+# Tier:       4 · Advanced
+# Category:   rollback_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | error: no rollout history found for deployment "app"
+#   | rollback failed — failed to rollback to revision 41
+#
+# How it is solved:
+#   MODIFY k8s/deployment.yaml
+#     - Restored revisionHistoryLimit to 10 in k8s/deployment.yaml — with 0 Kubernetes deletes every old ReplicaSet, so "kubectl rollout undo" has no revision to return to
+#
+# Apply:      git apply 04-advanced/142-rollback_failure.diff
+diff --git a/k8s/deployment.yaml b/k8s/deployment.yaml
+--- a/k8s/deployment.yaml
++++ b/k8s/deployment.yaml
+@@ -3,7 +3,7 @@
+ metadata:
+   name: app
+ spec:
+-  revisionHistoryLimit: 0
++  revisionHistoryLimit: 10
+   replicas: 2
+   selector:
+     matchLabels:

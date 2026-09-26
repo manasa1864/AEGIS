@@ -1,0 +1,41 @@
+# Aegis fix catalog #030 — Monorepo job runs a Node version below its package's engines
+#
+# Tier:       1 · Simple
+# Category:   node_version (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | npm ERR! code EBADENGINE
+#   | npm ERR! engine Unsupported engine
+#   | npm ERR! notsup Not compatible with your version of node/npm: api@1.4.2
+#   | npm ERR! notsup Required: {"node":">=18"}
+#   | npm ERR! notsup Actual:   {"npm":"8.19.4","node":"v16.20.2"}
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Pinned node-version to 20 (LTS) — specified version is unavailable on GitHub runners
+#     - Node 20 is current LTS with widest ecosystem compatibility
+#     - Updated node-version to 18 — EBADENGINE: a dependency requires Node 18+
+#     - the runner was using a lower version
+#
+# Apply:      git apply 01-simple/030-node-engines-job-dir.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,7 +14,7 @@
+       - uses: actions/checkout@v4
+       - uses: actions/setup-node@v4
+         with:
+-          node-version: 20
++          node-version: '18'
+       - run: npm install
+   test-api:
+     runs-on: ubuntu-latest
+@@ -25,6 +25,6 @@
+       - uses: actions/checkout@v4
+       - uses: actions/setup-node@v4
+         with:
+-          node-version: 16
++          node-version: '18'
+       - run: npm install
+       - run: npm test

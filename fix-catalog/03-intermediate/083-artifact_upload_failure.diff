@@ -1,0 +1,34 @@
+# Aegis fix catalog #083 — Artifact upload fails on transient error
+#
+# Tier:       3 · Intermediate
+# Category:   artifact_upload_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error: Failed to upload artifact: Unable to make request: ECONNRESET
+#   | artifact upload failed after 5 attempts
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added S3 fallback on artifact upload failure — GitHub artifact storage has occasional outages
+#     - uploading to S3 as a fallback ensures build outputs are preserved even when the GitHub service is degraded
+#
+# Apply:      git apply 03-intermediate/083-artifact_upload_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -26,6 +26,14 @@
+           cache: npm
+       - run: npm ci
+       - uses: actions/upload-artifact@v4
++      - name: Fallback upload to S3
++        if: failure()
++        run: |
++          aws s3 cp ./dist/ s3://${{ secrets.ARTIFACTS_BUCKET }}/${{ github.run_id }}/ --recursive
++        env:
++          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
++          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
++          AWS_DEFAULT_REGION: us-east-1
+         with:
+           name: reports
+           path: reports/

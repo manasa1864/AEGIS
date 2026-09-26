@@ -1,0 +1,28 @@
+# Aegis fix catalog #041 — PyYAML 6 requires an explicit Loader
+#
+# Tier:       2 · Source code
+# Category:   python_deps (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Traceback (most recent call last):
+#   |   File "/home/runner/work/app/app/worker/main.py", line 6, in load_config
+#   |     cfg = yaml.load(f)
+#   | TypeError: load() missing 1 required positional argument: 'Loader'
+#
+# How it is solved:
+#   MODIFY worker/main.py
+#     - Replaced yaml.load(x) with yaml.safe_load(x) (line 6) — PyYAML 6 made the Loader argument mandatory
+#     - safe_load is the drop-in, secure equivalent
+#
+# Apply:      git apply 02-code/041-code-pyyaml-loader.diff
+diff --git a/worker/main.py b/worker/main.py
+--- a/worker/main.py
++++ b/worker/main.py
+@@ -3,5 +3,5 @@
+ 
+ def load_config(path):
+     with open(path) as f:
+-        cfg = yaml.load(f)
++        cfg = yaml.safe_load(f)
+     return cfg

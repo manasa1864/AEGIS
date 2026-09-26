@@ -1,0 +1,12 @@
+# Aegis fix catalog #116 — gcloud without authentication
+#
+# Tier:       4 · Advanced
+# Category:   gcp_auth_failure (auto-diagnosed from the log below)
+# Engine:     reported to the repo owner
+#
+# CI log:
+#   | ERROR: (gcloud.run.deploy) You do not currently have an active account selected.
+#   | GOOGLE_APPLICATION_CREDENTIALS is not set — gcloud auth failed
+#
+# How it is solved:
+#   CI needs Google Cloud credentials (Workload Identity Federation or a service-account key secret) that only the project owner can create.

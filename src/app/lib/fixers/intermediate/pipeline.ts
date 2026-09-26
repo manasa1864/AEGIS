@@ -4,6 +4,7 @@
 // concurrency groups, missing reports directory, fail-fast, job outputs.
 
 import { RuleFix, isGitHubWorkflow, isGitLabCI, patchGitHubJobBlocks, patchGitLabJobBlocks, declareJobOutputs } from '../helpers';
+import { workflowJobs } from '../workflowJobs';
 
 /** Add needs: [build] to test/deploy/publish jobs that are missing a dependency. */
 export function fixMissingJobNeeds(files: Array<{ path: string; content: string }>): RuleFix[] {
@@ -1359,38 +1360,59 @@ export function fixDownloadAfterUpload(files: Array<{ path: string; content: str
   for (const f of files) {
     if (!isGitHubWorkflow(f.path)) continue;
     if (!f.content.includes('download-artifact') || !f.content.includes('upload-artifact')) continue;
-    // Find the job that downloads and check if it has needs: pointing to all upload jobs
     const lines = f.content.split('\n');
-    const uploadJobs: string[] = [];
-    const downloadJobs: string[] = [];
-    let curJob = '';
-    for (const line of lines) {
-      const jm = line.match(/^  ([\w-]+):\s*$/);
-      if (jm) curJob = jm[1];
-      if (line.includes('upload-artifact') && curJob) uploadJobs.push(curJob);
-      if (line.includes('download-artifact') && curJob) downloadJobs.push(curJob);
-    }
-    if (uploadJobs.length === 0 || downloadJobs.length === 0) continue;
-    let content = f.content;
-    for (const dj of downloadJobs) {
-      const djBlock = content.match(new RegExp(`  ${dj}:[\\s\\S]*?(?=\\n  [\\w-]+:|$)`))?.[0] ?? '';
-      const missingUploaders = uploadJobs.filter(uj => !djBlock.includes(uj));
-      if (missingUploaders.length === 0) continue;
-      const needsMatch = djBlock.match(/needs:\s*\[([^\]]+)\]/);
-      if (needsMatch) {
-        content = content.replace(
-          new RegExp(`(  ${dj}:[\\s\\S]*?)needs:\\s*\\[([^\\]]+)\\]`),
-          (_, header, deps) => `${header}needs: [${deps}, ${missingUploaders.join(', ')}]`,
-        );
-      } else {
-        content = content.replace(
-          new RegExp(`^(  ${dj}:)$`, 'm'),
-          `$1\n    needs: [${missingUploaders.join(', ')}]`,
-        );
+    const jobs = workflowJobs(f.path, f.content);
+    // per job: artifact names it uploads / downloads ('*' = a download without a name gets every artifact)
+    const artifactNames = (start: number, end: number, action: 'upload' | 'download') => {
+      const names: string[] = [];
+      for (let i = start; i < end; i++) {
+        if (!new RegExp(`uses:\\s*actions/${action}-artifact@`).test(lines[i])) continue;
+        let itemAt = i;
+        while (itemAt > start && !/^\s*- /.test(lines[itemAt])) itemAt--;
+        const stepIndent = lines[itemAt].search(/\S/);
+        let name = '*';
+        for (let k = i + 1; k < end && (lines[k].trim() === '' || lines[k].search(/\S/) > stepIndent) && !/^\s*- /.test(lines[k]); k++) {
+          const m = lines[k].match(/^\s*name:\s*['"]?([^'"#\n]+?)['"]?\s*(?:#.*)?$/);
+          if (m) name = m[1].trim();
+        }
+        names.push(name);
       }
+      return names;
+    };
+    const needsOf = (start: number, end: number): string[] => {
+      const block = lines.slice(start + 1, end).join('\n');
+      const inline = block.match(/^\s{2,}needs:\s*\[([^\]]*)\]/m) ?? block.match(/^\s{2,}needs:\s*([\w-]+)\s*$/m);
+      if (inline) return inline[1].split(',').map(s => s.trim().replace(/['"]/g, '')).filter(Boolean);
+      const list = block.match(/^\s{2,}needs:\s*\n((?:\s+-\s*[\w-]+\s*\n?)+)/m);
+      return list ? [...list[1].matchAll(/-\s*([\w-]+)/g)].map(m => m[1]) : [];
+    };
+    const info = jobs.map(j => ({ ...j, uploads: artifactNames(j.start, j.end, 'upload'), downloads: artifactNames(j.start, j.end, 'download'), needs: needsOf(j.start, j.end) }));
+    const byId = new Map(info.map(j => [j.id, j]));
+    const upstream = (id: string, seen = new Set<string>()): Set<string> => {
+      for (const n of byId.get(id)?.needs ?? []) if (!seen.has(n)) { seen.add(n); upstream(n, seen); }
+      return seen;
+    };
+    const edits: Array<{ job: typeof info[number]; add: string[] }> = [];
+    for (const d of info.filter(j => j.downloads.length)) {
+      const reach = upstream(d.id);
+      const producers = info.filter(u => u.id !== d.id && u.uploads.some(n => d.downloads.includes('*') || d.downloads.includes(n) || n === '*'));
+      const add = producers.map(p => p.id).filter(id => !reach.has(id));
+      if (add.length) edits.push({ job: d, add });
     }
-    if (content !== f.content)
-      fixes.push({ path: f.path, content, explanation: `Added missing upload jobs to download job's needs: — download-artifact fails with "artifact not found" when the uploading job hasn't finished yet; needs: creates the correct sequential dependency`, confidence: 90 });
+    if (edits.length === 0) continue;
+    // later jobs first so line indices stay valid
+    for (const { job, add } of edits.sort((a, b) => b.job.start - a.job.start)) {
+      const childIndent = lines.slice(job.start + 1, job.end).find(l => l.trim())?.match(/^\s*/)?.[0] ?? '    ';
+      const at = lines.findIndex((l, i) => i > job.start && i < job.end && /^\s+needs:/.test(l));
+      if (at >= 0 && /needs:\s*\[/.test(lines[at])) lines[at] = lines[at].replace(/\]\s*$/, `, ${add.join(', ')}]`);
+      else if (at >= 0 && /needs:\s*[\w-]+\s*$/.test(lines[at])) lines[at] = lines[at].replace(/needs:\s*([\w-]+)\s*$/, `needs: [$1, ${add.join(', ')}]`);
+      else if (at >= 0) lines.splice(at + 1, 0, ...add.map(a => `${childIndent}  - ${a}`));
+      else lines.splice(job.start + 1, 0, `${childIndent}needs: [${add.join(', ')}]`);
+    }
+    fixes.push({
+      path: f.path, content: lines.join('\n'), confidence: 92,
+      explanation: `Made artifact downloads wait for their uploads: ${edits.map(e => `${e.job.id} now needs [${e.add.join(', ')}]`).join('; ')} — without needs: the jobs start in parallel and download-artifact fails with "Artifact not found" before the upload exists`,
+    });
   }
   return fixes;
 }

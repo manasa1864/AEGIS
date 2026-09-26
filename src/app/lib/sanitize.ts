@@ -57,7 +57,8 @@ const ERROR_LINE_RE =
  *   4. If the extracted chunk still exceeds budget, fall back to the tail
  *      (most recent output is almost always where the failure is).
  */
-export function chunkLogs(rawLogs: string): string {
+export function chunkLogs(rawLogs: string, maxChars = MAX_LOG_CHARS): string {
+  const MAX_LOG_CHARS = maxChars;
   const sanitized = sanitizeForAI(rawLogs);
   if (sanitized.length <= MAX_LOG_CHARS) return sanitized;
 
@@ -79,6 +80,10 @@ export function chunkLogs(rawLogs: string): string {
       .join('\n');
 
     if (chunk.length <= MAX_LOG_CHARS) return chunk;
+    // Too many error lines: keep the first ones (compilers print the root error
+    // first) plus the log's tail (summaries such as "✖ 12 problems" / audit totals).
+    const head = Math.floor(MAX_LOG_CHARS * 0.7);
+    return `${chunk.slice(0, head)}\n[… ${lines.length} lines total — error lines truncated]\n${sanitized.slice(-(MAX_LOG_CHARS - head))}`;
   }
 
   // Tail fallback — last N characters

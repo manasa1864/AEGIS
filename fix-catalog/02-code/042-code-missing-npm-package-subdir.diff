@@ -1,0 +1,26 @@
+# Aegis fix catalog #042 — Monorepo: missing package declared in the package that imports it
+#
+# Tier:       2 · Source code
+# Category:   missing_dependency (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | src/routes/orders.ts(2,22): error TS2307: Cannot find module 'uuid' or its corresponding type declarations.
+#
+# How it is solved:
+#   MODIFY services/api/package.json
+#     - Declared missing package uuid in services/api/package.json — the code imports it but it was never added, so installs on a clean runner cannot resolve the import. Pinned to "latest": replace with the exact version and regenerate the lockfile before merging
+#
+# Apply:      git apply 02-code/042-code-missing-npm-package-subdir.diff
+diff --git a/services/api/package.json b/services/api/package.json
+--- a/services/api/package.json
++++ b/services/api/package.json
+@@ -2,6 +2,7 @@
+   "name": "api",
+   "private": true,
+   "dependencies": {
+-    "express": "^4.21.2"
++    "express": "^4.21.2",
++    "uuid": "latest"
+   }
+ }

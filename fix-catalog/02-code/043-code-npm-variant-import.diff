@@ -1,0 +1,25 @@
+# Aegis fix catalog #043 — Config imports a package variant the project does not use
+#
+# Tier:       2 · Source code
+# Category:   missing_dependency (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | failed to load config from /home/runner/work/app/app/web/vite.config.ts
+#   | error during build:
+#   | Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@vitejs/plugin-react' imported from /home/runner/work/app/app/web/vite.config.ts
+#
+# How it is solved:
+#   MODIFY web/vite.config.ts
+#     - Imported the package variant the project actually depends on: '@vitejs/plugin-react' → '@vitejs/plugin-react-swc' — '@vitejs/plugin-react' is not installed, while its variant is declared in package.json
+#
+# Apply:      git apply 02-code/043-code-npm-variant-import.diff
+diff --git a/web/vite.config.ts b/web/vite.config.ts
+--- a/web/vite.config.ts
++++ b/web/vite.config.ts
+@@ -1,4 +1,4 @@
+ import { defineConfig } from 'vite';
+-import react from '@vitejs/plugin-react';
++import react from '@vitejs/plugin-react-swc';
+ 
+ export default defineConfig({ plugins: [react()] });

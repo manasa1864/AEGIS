@@ -120,7 +120,7 @@ class SourceEdits {
   result(summary: (notes: string[]) => string, confidence: number): RuleFix[] {
     const out: RuleFix[] = [];
     for (const [path, lines] of this.edited) {
-      const content = lines.filter(l => l !== REMOVED).join('\n');
+      const content = (keepPlaceholders ? lines : lines.filter(l => l !== REMOVED)).join('\n');
       const original = this.files.find(f => f.path === path)!.content;
       if (content !== original && this.notes.has(path)) {
         out.push({ path, content, explanation: summary(this.notes.get(path)!), confidence });
@@ -130,6 +130,20 @@ class SourceEdits {
   }
 }
 const REMOVED = '\u0000__aegis_removed__';
+
+// Several fixers may edit one file at line numbers the tools printed. While the
+// engine runs them, a removed line stays as a placeholder so the next fixer's
+// line numbers still point at the right code; the engine strips placeholders after.
+let keepPlaceholders = false;
+
+/** Run line-precise fixers with removed lines kept as placeholders (see above). */
+export function withStableLineNumbers<T>(fn: () => T): T {
+  const prev = keepPlaceholders;
+  keepPlaceholders = true;
+  try { return fn(); } finally { keepPlaceholders = prev; }
+}
+export const hasLinePlaceholders = (content: string) => content.includes(REMOVED);
+export const stripLinePlaceholders = (content: string) => content.split('\n').filter(l => l !== REMOVED).join('\n');
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -184,7 +198,7 @@ export function fixUnusedImports(logs: string, files: Files): RuleFix[] {
   for (const raw of logs.split('\n')) {
     const header = raw.match(/^\s*((?:\/|[A-Za-z]:[\\/]|\.{0,2}\/)?[\w@.\-/\\]+\.[cm]?[jt]sx?)\s*$/);
     if (header) { current = normalizeRepoPath(header[1]); continue; }
-    const m = raw.match(/^\s+(\d+):\d+\s+(?:error|warning)\s+'([\w$]+)' is (?:defined|assigned a value) but never used.*(?:no-unused-vars)/);
+    const m = raw.match(/^\s*(\d+):\d+\s+(?:error|warning)\s+'([\w$]+)' is (?:defined|assigned a value) but never used.*(?:no-unused-vars)/);
     if (current && m) findings.push({ ref: current, line: +m[1], name: m[2] });
   }
   if (findings.length === 0) return [];
@@ -289,7 +303,7 @@ export function fixPreferConst(logs: string, files: Files): RuleFix[] {
   for (const raw of logs.split('\n')) {
     const header = raw.match(/^\s*((?:\/|[A-Za-z]:[\\/]|\.{0,2}\/)?[\w@.\-/\\]+\.[cm]?[jt]sx?)\s*$/);
     if (header) { current = normalizeRepoPath(header[1]); continue; }
-    const m = raw.match(/^\s+(\d+):\d+\s+(?:error|warning)\s+'([\w$]+)' is never reassigned\. Use 'const' instead\s+prefer-const/);
+    const m = raw.match(/^\s*(\d+):\d+\s+(?:error|warning)\s+'([\w$]+)' is never reassigned\. Use 'const' instead\s+prefer-const/);
     if (!m || !current) continue;
     const file = findFile(files, current);
     if (!file) continue;
@@ -417,6 +431,24 @@ export function fixNullDerefAtStackFrame(logs: string, files: Files): RuleFix[] 
   const idx = +frame[2] - 1;
   const line = lines[idx];
   if (line === undefined) return [];
+
+  // Reading `arr[i].prop` inside `for (…; i <= arr.length; …)` — the last
+  // iteration indexes one past the end. The loop bound is the bug, not the access.
+  for (const idxAccess of line.matchAll(/([\w$.]+)\[([\w$]+)\]/g)) {
+    const [, arr, iv] = idxAccess;
+    const bound = new RegExp(`(\\b${escapeRe(iv)}\\s*)<=(\\s*${escapeRe(arr)}\\.length\\b)`);
+    for (let k = idx; k >= Math.max(0, idx - 12); k--) {
+      if (!/\bfor\s*\(/.test(lines[k]) || !bound.test(lines[k])) continue;
+      lines[k] = lines[k].replace(bound, '$1<$2');
+      return [{
+        path: file.path,
+        content: lines.join('\n'),
+        explanation: `Fixed an off-by-one loop bound at ${file.path}:${k + 1} (${iv} <= ${arr}.length → ${iv} < ${arr}.length) — the last iteration read ${arr}[${arr}.length], which is undefined, causing "Cannot read properties of undefined (reading '${prop}')"`,
+        confidence: 92,
+      }];
+    }
+  }
+
   // Guard the property access nearest to the reported column.
   const col = +frame[3] - 1;
   // `.prop` directly after an identifier/`)`/`]` — i.e. not already `?.prop`
@@ -433,76 +465,7 @@ export function fixNullDerefAtStackFrame(logs: string, files: Files): RuleFix[] 
   }];
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// 9. Missing npm package / missing @types
-// ═════════════════════════════════════════════════════════════════════════════
-
-const NODE_BUILTINS = new Set([
-  'assert', 'async_hooks', 'buffer', 'child_process', 'cluster', 'console', 'constants', 'crypto', 'dgram',
-  'diagnostics_channel', 'dns', 'domain', 'events', 'fs', 'http', 'http2', 'https', 'inspector', 'module',
-  'net', 'os', 'path', 'perf_hooks', 'process', 'punycode', 'querystring', 'readline', 'repl', 'stream',
-  'string_decoder', 'sys', 'timers', 'tls', 'trace_events', 'tty', 'url', 'util', 'v8', 'vm', 'wasi',
-  'worker_threads', 'zlib', 'test',
-]);
-
-function packageName(spec: string): string | null {
-  if (!spec || /^[./~#]|^@\/|^node:|^[a-z]+:/i.test(spec)) return null; // relative, alias, builtin scheme, url
-  const parts = spec.split('/');
-  const name = spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
-  if (!/^(?:@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*$/i.test(name) || NODE_BUILTINS.has(name)) return null;
-  return name;
-}
-
-export function fixMissingNpmPackage(logs: string, files: Files): RuleFix[] {
-  const pkgFile = files.find(f => f.path === 'package.json');
-  if (!pkgFile) return [];
-  let pkg: Record<string, unknown>;
-  try { pkg = JSON.parse(pkgFile.content); } catch { return []; }
-  const deps = (pkg.dependencies ?? {}) as Record<string, string>;
-  const devDeps = (pkg.devDependencies ?? {}) as Record<string, string>;
-  const has = (n: string) => n in deps || n in devDeps || n in ((pkg.peerDependencies ?? {}) as object);
-
-  const missingRuntime = new Set<string>();
-  const missingTypes = new Set<string>();
-  const patterns = [
-    /Cannot find (?:module|package) '([^']+)'(?! or its corresponding type declarations)/g,
-    /Can't resolve '([^']+)'/g,
-    /Failed to resolve import "([^"]+)"/g,
-    /Could not resolve "([^"]+)"/g,
-    /ERR_MODULE_NOT_FOUND\]: Cannot find package '([^']+)'/g,
-  ];
-  for (const re of patterns) {
-    for (const m of logs.matchAll(re)) {
-      const name = packageName(m[1]);
-      if (name && !has(name)) missingRuntime.add(name);
-    }
-  }
-  // TS2307/TS7016 for a package that IS installed → its type declarations are missing.
-  for (const m of logs.matchAll(/(?:TS2307: Cannot find module|TS7016: Could not find a declaration file for module) '([^']+)'/g)) {
-    const name = packageName(m[1]);
-    if (!name) continue;
-    if (has(name)) {
-      const typesPkg = name.startsWith('@') ? `@types/${name.slice(1).replace('/', '__')}` : `@types/${name}`;
-      if (!has(typesPkg)) missingTypes.add(typesPkg);
-    } else {
-      missingRuntime.add(name);
-    }
-  }
-  if (missingRuntime.size === 0 && missingTypes.size === 0) return [];
-
-  const sortObj = (o: Record<string, string>) => Object.fromEntries(Object.entries(o).sort(([a], [b]) => a.localeCompare(b)));
-  const next = { ...pkg };
-  if (missingRuntime.size) next.dependencies = sortObj({ ...deps, ...Object.fromEntries([...missingRuntime].map(n => [n, 'latest'])) });
-  if (missingTypes.size) next.devDependencies = sortObj({ ...devDeps, ...Object.fromEntries([...missingTypes].map(n => [n, 'latest'])) });
-  const indent = pkgFile.content.match(/^\{\n([ \t]+)"/)?.[1] ?? '  ';
-  const added = [...missingRuntime, ...missingTypes];
-  return [{
-    path: 'package.json',
-    content: JSON.stringify(next, null, indent) + '\n',
-    explanation: `Declared missing package${added.length > 1 ? 's' : ''} ${added.join(', ')} in package.json — the code imports ${added.length > 1 ? 'them' : 'it'} but ${added.length > 1 ? 'they were' : 'it was'} never added, so installs on a clean runner cannot resolve the import. Pinned to "latest": replace with the exact version and regenerate the lockfile before merging`,
-    confidence: 85,
-  }];
-}
+// 9. Missing npm packages live in ./manifests (they edit package.json, not source).
 
 // ═════════════════════════════════════════════════════════════════════════════
 // 10. Missing Python package — ModuleNotFoundError
@@ -625,4 +588,301 @@ export function fixCompilerSuggestions(logs: string, files: Files): RuleFix[] {
     edits.note(file.path, `${s.bad} → ${s.good} (line ${s.line})`);
   }
   return edits.result(notes => `Applied the compiler's own "did you mean" suggestion${notes.length > 1 ? 's' : ''}: ${notes.join(', ')} — the compiler named the correct identifier; only that token at the reported location was changed`, 96);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 12. ESLint rule violations with one safe mechanical fix
+// ═════════════════════════════════════════════════════════════════════════════
+//   eqeqeq            ==/!= → ===/!== at the reported operator
+//   use-isnan         x == NaN → Number.isNaN(x)
+//   no-console        drop a complete one-line console.* statement
+//   no-var            top-level `var` → `let` when the name is declared once and not used earlier
+//   no-unused-vars    drop an unused local whose initializer has no side effects
+// Anything needing judgement (no-explicit-any, complex expressions) is left to the AI pass.
+
+interface LintHit { ref: string; line: number; col: number; message: string; rule: string }
+
+/** ESLint "stylish" (file header + indented rows) and "unix"/"compact" (path:line:col) output. */
+export function parseEslintOutput(logs: string): LintHit[] {
+  const hits: LintHit[] = [];
+  let current: string | null = null;
+  for (const rawLine of logs.split('\n')) {
+    const raw = rawLine.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s/, '').replace(/^##\[(?:error|warning)\]/, '');
+    const header = raw.match(/^\s*((?:\/|[A-Za-z]:[\\/]|\.{0,2}\/)?[\w@.\-/\\]+\.(?:[cm]?[jt]sx?|vue|svelte))\s*$/);
+    if (header) { current = normalizeRepoPath(header[1]); continue; }
+    let m = raw.match(/^\s*(\d+):(\d+)\s+(?:error|warning)\s+(.+?)\s{2,}(@?[\w-]+(?:\/[\w-]+)?)\s*$/);
+    if (m && current) { hits.push({ ref: current, line: +m[1], col: +m[2], message: m[3], rule: m[4] }); continue; }
+    m = raw.match(/^((?:\/|[A-Za-z]:[\\/])?[^\s:]+\.[cm]?[jt]sx?):(\d+):(\d+):\s*(.+?)\s*\[(?:Error|Warning)\/(@?[\w-]+(?:\/[\w-]+)?)\]\s*$/);
+    if (m) hits.push({ ref: normalizeRepoPath(m[1]), line: +m[2], col: +m[3], message: m[4], rule: m[5] });
+  }
+  return hits;
+}
+
+const SIDE_EFFECT_FREE = /^(?:[\w$.[\]'"`\s+\-*/%]|\?\.|!|<|>|=(?==)|&&|\|\|)*$/; // no calls, `new`, assignment, await
+const balanced = (s: string) => {
+  let depth = 0;
+  for (const ch of s) { if (ch === '(') depth++; else if (ch === ')' && --depth < 0) return false; }
+  return depth === 0;
+};
+
+export function fixEslintRuleViolations(logs: string, files: Files): RuleFix[] {
+  const hits = parseEslintOutput(logs).filter(h => /^(eqeqeq|use-isnan|no-console|no-var|(?:@typescript-eslint\/)?no-unused-vars)$/.test(h.rule));
+  if (hits.length === 0) return [];
+  const edits = new SourceEdits(files);
+  for (const h of hits) {
+    const file = findFile(files, h.ref);
+    if (!file) continue;
+    const lines = edits.lines(file.path)!;
+    const idx = h.line - 1;
+    const line = lines[idx];
+    if (line === undefined || line === REMOVED) continue;
+    const at = h.col - 1;
+
+    if (h.rule === 'eqeqeq') {
+      const loose = [...line.matchAll(/(?<![=!<>])([=!])=(?!=)/g)];
+      const hit = loose.find(x => Math.abs(x.index! - at) <= 1) ?? (loose.length === 1 ? loose[0] : undefined);
+      if (!hit) continue;
+      lines[idx] = line.slice(0, hit.index!) + `${hit[1]}==` + line.slice(hit.index! + 2);
+      edits.note(file.path, `strict equality at line ${h.line}`);
+    } else if (h.rule === 'use-isnan') {
+      const next = line
+        .replace(/([\w$.[\]]+)\s*(===?|!==?)\s*NaN\b/, (_, x, op) => `${op.startsWith('!') ? '!' : ''}Number.isNaN(${x})`)
+        .replace(/\bNaN\s*(===?|!==?)\s*([\w$.[\]]+)/, (_, op, x) => `${op.startsWith('!') ? '!' : ''}Number.isNaN(${x})`);
+      if (next === line) continue;
+      lines[idx] = next;
+      edits.note(file.path, `NaN comparison at line ${h.line} (always false with ==)`);
+    } else if (h.rule === 'no-console') {
+      const stmt = line.match(/^\s*console\.\w+\((.*)\);?\s*(?:\/\/.*)?$/);
+      if (!stmt || !balanced(`(${stmt[1]})`)) continue;
+      lines[idx] = REMOVED;
+      edits.note(file.path, `console statement at line ${h.line}`);
+    } else if (h.rule === 'no-var') {
+      const decl = line.match(/^var\s+([\w$]+)\b/);
+      if (!decl) continue;
+      const name = escapeRe(decl[1]);
+      const declaredOnce = lines.filter(l => new RegExp(`^\\s*(?:var|let|const)\\s+${name}\\b`).test(l)).length === 1;
+      const usedBefore = lines.slice(0, idx).some(l => new RegExp(`(?<![\\w$.])${name}(?![\\w$])`).test(l));
+      if (!declaredOnce || usedBefore) continue;
+      // never reassigned → const (a `let` would just trade no-var for prefer-const)
+      const reassigned = lines.some((l, i) => i !== idx && (
+        new RegExp(`(?<![\\w$.])${name}\\s*(?:[-+*/%&|^]|\\*\\*|<<|>>>?|\\?\\?|&&|\\|\\|)?=(?!=)`).test(l) ||
+        new RegExp(`(?:\\+\\+|--)\\s*${name}(?![\\w$])|(?<![\\w$.])${name}\\s*(?:\\+\\+|--)`).test(l)));
+      const kw = !reassigned && /=/.test(line.slice(decl[0].length)) ? 'const' : 'let';
+      lines[idx] = line.replace(/^var\b/, kw);
+      edits.note(file.path, `var → ${kw} at line ${h.line}`);
+    } else {
+      const unused = h.message.match(/^'([\w$]+)' is assigned a value but never used/);
+      if (!unused) continue;
+      const decl = line.match(new RegExp(`^\\s*(?:const|let|var)\\s+${escapeRe(unused[1])}(?:\\s*:\\s*[^=]+)?\\s*=\\s*(.+?);?\\s*(?://.*)?$`));
+      if (!decl || !SIDE_EFFECT_FREE.test(decl[1]) || /\bawait\b|\bnew\b|\bdelete\b|\+\+|--/.test(decl[1])) continue;
+      lines[idx] = REMOVED;
+      edits.note(file.path, `unused variable '${unused[1]}' at line ${h.line}`);
+    }
+  }
+  return edits.result(notes => `Fixed ESLint violations with their mechanical fix: ${notes.join('; ')} — only the reported tokens/lines were changed`, 93);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 13. Python lint violations (ruff / flake8 / pycodestyle / bugbear)
+// ═════════════════════════════════════════════════════════════════════════════
+//   E711  == None / != None      → is None / is not None
+//   E722  bare `except:`         → except Exception:
+//   F541  f-string without placeholders → plain string
+//   B006  mutable default argument → None + initialise in the body
+
+export function fixPythonLintViolations(logs: string, files: Files): RuleFix[] {
+  const hits: Array<{ ref: string; line: number; col: number; code: string }> = [];
+  for (const raw of logs.split('\n')) {
+    const m = raw.match(/([^\s:]+\.py):(\d+):(\d+):\s*(E711|E722|F541|B006)\b/);
+    if (m) hits.push({ ref: normalizeRepoPath(m[1]), line: +m[2], col: +m[3], code: m[4] });
+  }
+  if (hits.length === 0) return [];
+  const edits = new SourceEdits(files);
+  // Later lines first — B006 inserts a line, which must not shift pending line numbers.
+  for (const h of hits.sort((a, b) => b.line - a.line)) {
+    const file = findFile(files, h.ref);
+    if (!file) continue;
+    const lines = edits.lines(file.path)!;
+    const idx = h.line - 1;
+    const line = lines[idx];
+    if (line === undefined || line === REMOVED) continue;
+
+    if (h.code === 'E711') {
+      const next = line.replace(/\s*!=\s*None\b/, ' is not None').replace(/\s*==\s*None\b/, ' is None');
+      if (next === line) continue;
+      lines[idx] = next;
+      edits.note(file.path, `None comparison at line ${h.line}`);
+    } else if (h.code === 'E722') {
+      if (!/^\s*except\s*:/.test(line)) continue;
+      lines[idx] = line.replace(/except\s*:/, 'except Exception:');
+      edits.note(file.path, `bare except at line ${h.line}`);
+    } else if (h.code === 'F541') {
+      const at = h.col - 1;
+      const pos = /[fF]/.test(line[at] ?? '') && /['"]/.test(line[at + 1] ?? '') ? at : line.search(/(?<![\w])[fF](?=['"])/);
+      if (pos < 0) continue;
+      const lit = line.slice(pos + 1).match(/^('''|"""|'|")(.*?)\1/);
+      if (!lit || /[{}]/.test(lit[2])) continue;
+      lines[idx] = line.slice(0, pos) + line.slice(pos + 1);
+      edits.note(file.path, `f-string without placeholders at line ${h.line}`);
+    } else {
+      // def f(a, out=[]):  →  def f(a, out=None):  +  if out is None: out = []
+      const def = line.match(/^(\s*)(?:async\s+)?def\s+\w+\(.*\):\s*(#.*)?$/);
+      if (!def) continue;
+      const params = [...line.matchAll(/([\w]+)\s*(?::\s*[^=,)]+)?=\s*(\[\]|\{\}|list\(\)|dict\(\)|set\(\))/g)];
+      if (params.length === 0) continue;
+      let next = line;
+      for (const p of params) next = next.replace(p[0], p[0].replace(p[2], 'None'));
+      // body indentation from the first non-blank line after the def (after a docstring, if any)
+      let k = idx + 1;
+      while (k < lines.length && !lines[k].trim()) k++;
+      const bodyIndent = lines[k]?.match(/^\s*/)?.[0] ?? `${def[1]}    `;
+      if (bodyIndent.length <= def[1].length) continue;
+      let insertAt = k;
+      const doc = lines[k]?.trim().match(/^[rbuRBU]?('''|""")/);
+      if (doc) {
+        const q = doc[1];
+        const rest = lines[k].trim().slice(lines[k].trim().indexOf(q) + 3);
+        if (rest.includes(q)) insertAt = k + 1;
+        else { let e = k + 1; while (e < lines.length && !lines[e].includes(q)) e++; insertAt = e + 1; }
+      }
+      lines[idx] = next;
+      const inits = params.map(p => `${bodyIndent}if ${p[1]} is None:\n${bodyIndent}    ${p[1]} = ${p[2]}`);
+      lines.splice(insertAt, 0, ...inits.join('\n').split('\n'));
+      edits.note(file.path, `mutable default argument${params.length > 1 ? 's' : ''} ${params.map(p => p[1]).join(', ')} at line ${h.line}`);
+    }
+  }
+  return edits.result(notes => `Fixed Python lint violations with their standard rewrite: ${notes.join('; ')} — behaviour is preserved (a mutable default is now created fresh per call, which is what the code intended)`, 93);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 14. Imported name exists in the module but is not exported (TS2459 / TS2305)
+// ═════════════════════════════════════════════════════════════════════════════
+
+const TS_EXT = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '/index.ts', '/index.tsx', '/index.js'];
+
+/** Repo path of a relative module specifier imported from `importer`, among `files`. */
+export function resolveRelativeModule(files: Files, importer: string, spec: string): string | undefined {
+  if (!spec.startsWith('.')) return undefined;
+  const parts = (importer.includes('/') ? importer.slice(0, importer.lastIndexOf('/')) : '').split('/').filter(Boolean);
+  for (const seg of spec.split('/')) {
+    if (seg === '..') parts.pop();
+    else if (seg !== '.') parts.push(seg);
+  }
+  const base = parts.join('/').replace(/\.(?:js|jsx|mjs|cjs)$/, '');
+  return [base, ...TS_EXT.map(e => base + e)].find(p => files.some(f => f.path === p));
+}
+
+/** Relative modules named by "has no exported member" errors — contextBuilder fetches them. */
+export function missingExportModules(logs: string): Array<{ importer: string; spec: string }> {
+  const out: Array<{ importer: string; spec: string }> = [];
+  for (const m of logs.matchAll(/([^\s(]+\.[cm]?[jt]sx?)\(\d+,\d+\):\s*error TS(?:2459|2305): Module '"(\.[^"]+)"'/g)) {
+    out.push({ importer: normalizeRepoPath(m[1]), spec: m[2] });
+  }
+  return out;
+}
+
+export function fixMissingExport(logs: string, files: Files): RuleFix[] {
+  const re = /([^\s(]+\.[cm]?[jt]sx?)\(\d+,\d+\):\s*error TS(?:2459|2305): Module '"(\.[^"]+)"' (?:declares '([\w$]+)' locally, but it is not exported|has no exported member '([\w$]+)')/g;
+  const edits = new SourceEdits(files);
+  for (const m of logs.matchAll(re)) {
+    const importer = findFile(files, normalizeRepoPath(m[1]));
+    if (!importer) continue;
+    const target = resolveRelativeModule(files, importer.path, m[2]);
+    if (!target) continue;
+    const name = m[3] ?? m[4];
+    const lines = edits.lines(target)!;
+    const declRe = new RegExp(`^(?:(?:async\\s+)?function\\*?|class|const|let|var|interface|type|enum|abstract\\s+class)\\s+${escapeRe(name)}\\b`);
+    const idx = lines.findIndex(l => l !== REMOVED && declRe.test(l));
+    // exactly one top-level declaration, and the module does not already export the name some other way
+    if (idx < 0 || lines.filter(l => declRe.test(l)).length > 1) continue;
+    if (lines.some(l => new RegExp(`^export\\s*\\{[^}]*\\b${escapeRe(name)}\\b`).test(l))) continue;
+    lines[idx] = `export ${lines[idx]}`;
+    edits.note(target, `'${name}' (imported by ${importer.path})`);
+  }
+  return edits.result(notes => `Exported ${notes.join(', ')} — the module declares it at top level but never exported it, so the import failed to compile (TS2459/TS2305)`, 94);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 15. Python import of a module that moved inside a local package
+// ═════════════════════════════════════════════════════════════════════════════
+//   ModuleNotFoundError: No module named 'worker.cleanup' while the repo has
+//   worker/jobs/cleanup.py (and no worker/cleanup.py) → import worker.jobs.cleanup
+
+/** Local dotted modules that failed to import — contextBuilder looks their files up in the tree. */
+export function missingLocalModules(logs: string): string[] {
+  return [...new Set([...logs.matchAll(/ModuleNotFoundError: No module named '([\w]+(?:\.[\w]+)+)'/g)].map(m => m[1]))];
+}
+
+export function fixPythonModulePath(logs: string, files: Files): RuleFix[] {
+  const mods = missingLocalModules(logs);
+  if (mods.length === 0) return [];
+  const edits = new SourceEdits(files);
+  const lines = logs.split('\n');
+  for (const mod of mods) {
+    const parts = mod.split('.');
+    const [top, leaf] = [parts[0], parts[parts.length - 1]];
+    // Each file named like the missing leaf, re-expressed as a dotted path from its
+    // package root — the deepest directory named `top` above it (services/worker/worker,
+    // not the services/worker project folder that merely shares the name).
+    const dotted = new Set<string>();
+    for (const f of files) {
+      if (!f.path.endsWith(`/${leaf}.py`) && !f.path.endsWith(`/${leaf}/__init__.py`)) continue;
+      const segs = f.path.split('/');
+      const pkgAt = segs.lastIndexOf(top, segs.length - 2);
+      if (pkgAt < 0) continue;
+      const root = segs.slice(0, pkgAt).join('/');
+      // the old path must really be gone — otherwise this is not a relocation
+      const oldPath = [root, ...parts].filter(Boolean).join('/');
+      if (files.some(x => x.path === `${oldPath}.py` || x.path === `${oldPath}/__init__.py`)) { dotted.clear(); break; }
+      dotted.add(segs.slice(pkgAt).join('/').replace(/\/__init__\.py$|\.py$/, '').split('/').join('.'));
+    }
+    if (dotted.size !== 1) continue; // unknown or ambiguous
+    const moved = [...dotted][0];
+    if (moved === mod) continue;
+
+    // the importing file: the last repo frame before the error, or pytest's "importing test module"
+    const errAt = lines.findIndex(l => l.includes(`No module named '${mod}'`));
+    let importer: string | undefined;
+    const pytest = logs.match(/ImportError while importing test module '([^']+)'/);
+    for (let j = errAt - 1; j >= Math.max(0, errAt - 40) && !importer; j--) {
+      const fr = lines[j].match(/File "([^"]+\.py)", line \d+|^\s*([\w./-]+\.py):\d+: in <module>/);
+      const p = fr && normalizeRepoPath(fr[1] ?? fr[2]);
+      if (p && isRepoRelativeSource(p)) importer = findFile(files, p)?.path;
+    }
+    importer ??= pytest ? findFile(files, normalizeRepoPath(pytest[1]))?.path : undefined;
+    if (!importer) continue;
+    const src = edits.lines(importer)!;
+    const modRe = new RegExp(`^(\\s*(?:from|import)\\s+)${escapeRe(mod)}(?=\\s|$|,)`);
+    let changed = false;
+    src.forEach((l, i) => { if (l !== REMOVED && modRe.test(l)) { src[i] = l.replace(modRe, `$1${moved}`); changed = true; } });
+    if (changed) edits.note(importer, `${mod} → ${moved}`);
+  }
+  return edits.result(notes => `Corrected imports of relocated modules: ${notes.join(', ')} — the module lives at that path in the repo; the old dotted path no longer exists`, 94);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 16. PyYAML ≥ 6 — yaml.load() requires an explicit Loader
+// ═════════════════════════════════════════════════════════════════════════════
+
+export function fixPyYamlLoad(logs: string, files: Files): RuleFix[] {
+  if (!/load\(\) missing 1 required positional argument: 'Loader'/.test(logs)) return [];
+  const edits = new SourceEdits(files);
+  const lines = logs.split('\n');
+  lines.forEach((l, i) => {
+    if (!/missing 1 required positional argument: 'Loader'/.test(l)) return;
+    for (let j = i - 1; j >= Math.max(0, i - 30); j--) {
+      const fr = lines[j].match(/File "([^"]+\.py)", line (\d+)/);
+      const p = fr && normalizeRepoPath(fr[1]);
+      if (!p || !isRepoRelativeSource(p)) continue;
+      const file = findFile(files, p);
+      if (!file) break;
+      const src = edits.lines(file.path)!;
+      const idx = +fr![2] - 1;
+      // single-argument call only — yaml.load(stream) → yaml.safe_load(stream)
+      const next = src[idx]?.replace(/\byaml\.load\(([^,()]+)\)/, 'yaml.safe_load($1)');
+      if (next && next !== src[idx]) { src[idx] = next; edits.note(file.path, `line ${idx + 1}`); }
+      break;
+    }
+  });
+  return edits.result(notes => `Replaced yaml.load(x) with yaml.safe_load(x) (${notes.join(', ')}) — PyYAML 6 made the Loader argument mandatory; safe_load is the drop-in, secure equivalent`, 95);
 }

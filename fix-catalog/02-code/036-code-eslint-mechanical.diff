@@ -1,0 +1,42 @@
+# Aegis fix catalog #036 — ESLint rules with one mechanical fix (eqeqeq, use-isnan, no-console, no-var)
+#
+# Tier:       2 · Source code
+# Category:   lint_failure
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | /home/runner/work/app/app/src/inventory.ts
+#   |   1:1   error  Unexpected var, use let or const instead  no-var
+#   |   5:9   error  Expected '===' and instead saw '=='  eqeqeq
+#   |   8:7   error  Use the isNaN function to compare with NaN  use-isnan
+#   |   9:5   error  Unexpected console statement  no-console
+#   | 
+#   | ✖ 4 problems (4 errors, 0 warnings)
+#
+# How it is solved:
+#   MODIFY src/inventory.ts
+#     - Fixed ESLint violations with their mechanical fix: var → const at line 1
+#     - strict equality at line 5
+#     - NaN comparison at line 8 (always false with ==)
+#     - console statement at line 9 — only the reported tokens/lines were changed
+#
+# Apply:      git apply 02-code/036-code-eslint-mechanical.diff
+diff --git a/src/inventory.ts b/src/inventory.ts
+--- a/src/inventory.ts
++++ b/src/inventory.ts
+@@ -1,12 +1,11 @@
+-var threshold = 5;
++const threshold = 5;
+ 
+ export function adjust(rows: Array<{ qty: number }>, raw: string) {
+   const delta = Number(raw);
+-  if (rows.length == 0) return null;
++  if (rows.length === 0) return null;
+   if (delta < 0) return threshold;
+   const next = rows[0].qty + delta;
+-  if (next == NaN) {
+-    console.log('bad delta ' + raw);
++  if (Number.isNaN(next)) {
+     return null;
+   }
+   return next;

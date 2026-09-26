@@ -1,0 +1,26 @@
+# Aegis fix catalog #146 — Deployment selector does not match its pod template labels
+#
+# Tier:       4 · Advanced
+# Category:   deploy_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | The Deployment "api" is invalid: spec.template.metadata.labels: Invalid value: map[string]string{"app":"shop"}: `selector` does not match template `labels`
+#
+# How it is solved:
+#   MODIFY k8s/deployment.yaml
+#     - Aligned pod template labels with the workload selector (Deployment api: template labels now include app: api) — the API server rejects a workload whose spec.selector does not match spec.template.metadata.labels, so kubectl apply fails
+#
+# Apply:      git apply 04-advanced/146-k8s-selector-mismatch.diff
+diff --git a/k8s/deployment.yaml b/k8s/deployment.yaml
+--- a/k8s/deployment.yaml
++++ b/k8s/deployment.yaml
+@@ -10,7 +10,7 @@
+   template:
+     metadata:
+       labels:
+-        app: shop
++        app: api
+     spec:
+       containers:
+         - name: api

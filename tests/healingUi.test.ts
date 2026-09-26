@@ -3,9 +3,9 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  fixUnusedImports, fixPythonUnusedImports, fixNullDerefAtStackFrame, fixFocusedTests,
-  fixMissingNpmPackage, extractLogFileRefs,
+  fixUnusedImports, fixPythonUnusedImports, fixNullDerefAtStackFrame, fixFocusedTests, extractLogFileRefs,
 } from '../src/app/lib/fixers/code/source';
+import { fixMissingNpmPackage } from '../src/app/lib/fixers/code/manifests';
 import { unifiedDiff, diffLines, diffStats } from '../src/app/lib/lineDiff';
 import {
   startRun, applyStreamMessage, withFixes, withOutcome, inferOutcome, nodeStatusFor, type HealingRun,

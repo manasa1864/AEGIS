@@ -1,4 +1,4 @@
-# Aegis fix catalog #014 — Build references a Dockerfile that does not exist
+# Aegis fix catalog #014 — docker build looks for ./Dockerfile but it lives in a subfolder
 #
 # Tier:       1 · Simple
 # Category:   missing_file
@@ -9,18 +9,17 @@
 #
 # How it is solved:
 #   MODIFY .github/workflows/ci.yml
-#     - Added DOCKER_BUILDKIT=1 — enables BuildKit for faster layer caching and parallel build stages
+#     - Pointed docker build at docker/Dockerfile (-f) — the build looked for ./Dockerfile, which does not exist
+#     - docker/Dockerfile is the only Dockerfile in the repo
 #
 # Apply:      git apply 01-simple/014-missing_file.diff
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml
-@@ -14,6 +14,8 @@
- env:
-   CI: 'true'
-   NODE_ENV: test
-+  DOCKER_BUILDKIT: 1
-+  BUILDKIT_INLINE_CACHE: 1
- jobs:
-   build:
-     runs-on: ubuntu-latest
+@@ -29,5 +29,5 @@
+         with:
+           username: ${{ secrets.DOCKERHUB_USERNAME }}
+           password: ${{ secrets.DOCKERHUB_TOKEN }}
+-      - run: docker build -t app:latest .
++      - run: docker build -f docker/Dockerfile -t app:latest .
+       - run: docker push app:latest

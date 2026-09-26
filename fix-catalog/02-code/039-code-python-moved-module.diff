@@ -1,0 +1,29 @@
+# Aegis fix catalog #039 — Import of a module that moved inside the local package
+#
+# Tier:       2 · Source code
+# Category:   python_deps (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | ImportError while importing test module '/home/runner/work/app/app/services/worker/tests/test_cleanup.py'.
+#   | Hint: make sure your test modules/packages have valid Python names.
+#   | Traceback:
+#   | tests/test_cleanup.py:1: in <module>
+#   |     from worker.cleanup import job_token
+#   | E   ModuleNotFoundError: No module named 'worker.cleanup'
+#
+# How it is solved:
+#   MODIFY services/worker/tests/test_cleanup.py
+#     - Corrected imports of relocated modules: worker.cleanup → worker.jobs.cleanup — the module lives at that path in the repo
+#     - the old dotted path no longer exists
+#
+# Apply:      git apply 02-code/039-code-python-moved-module.diff
+diff --git a/services/worker/tests/test_cleanup.py b/services/worker/tests/test_cleanup.py
+--- a/services/worker/tests/test_cleanup.py
++++ b/services/worker/tests/test_cleanup.py
+@@ -1,4 +1,4 @@
+-from worker.cleanup import job_token
++from worker.jobs.cleanup import job_token
+ 
+ 
+ def test_token_length():

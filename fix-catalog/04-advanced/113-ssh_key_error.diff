@@ -1,0 +1,30 @@
+# Aegis fix catalog #113 — SSH deploy fails host key verification
+#
+# Tier:       4 · Advanced
+# Category:   ssh_key_error (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Host key verification failed.
+#   | err: ssh: handshake failed: knownhosts: key is unknown
+#   | Process exited with status 1
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added ssh-keyscan known_hosts step — SSH connection failed with "Host key verification failed"
+#
+# Apply:      git apply 04-advanced/113-ssh_key_error.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -25,6 +25,10 @@
+           node-version: 20
+           cache: npm
+       - run: npm ci
++      - name: Add SSH known hosts
++        run: |
++          mkdir -p ~/.ssh
++          ssh-keyscan -H ${{ secrets.PROD_HOST || 'example.com' }} >> ~/.ssh/known_hosts
+       - uses: appleboy/ssh-action@v1
+         with:
+           host: ${{ secrets.PROD_HOST }}

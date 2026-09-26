@@ -1,0 +1,24 @@
+# Aegis fix catalog #081 — Artifact storage quota / retention
+#
+# Tier:       3 · Intermediate
+# Category:   artifact_retention (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error: Failed to CreateArtifact: Artifact storage quota has been hit. Unable to upload any new artifacts.
+#   | artifact upload failed
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added retention-days: 7 to artifact uploads — artifacts default to 90 days which wastes storage quota
+#     - 7 days is sufficient for most CI debugging purposes
+#
+# Apply:      git apply 03-intermediate/081-artifact_retention.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -29,3 +29,4 @@
+         with:
+           name: coverage
+           path: coverage/
++          retention-days: 7

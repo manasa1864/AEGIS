@@ -1,0 +1,36 @@
+# Aegis fix catalog #028 — Scheduled workflow with an out-of-range cron field
+#
+# Tier:       1 · Simple
+# Category:   invalid_trigger
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Invalid workflow file: .github/workflows/nightly.yml#L5
+#   | The workflow is not valid. .github/workflows/nightly.yml (Line: 5, Col: 13): Invalid cron expression: hour 25 out of range
+#
+# How it is solved:
+#   MODIFY .github/workflows/nightly.yml
+#     - Added npm ci before build/test — no install step found
+#     - npm ci is required to populate node_modules before any npm scripts run
+#     - Fixed cron expression ('0 25 * * *' → '0 23 * * *': field values were outside their allowed range and were clamped to the nearest valid value) — GitHub Actions requires exactly 5 fields (minute 0-59, hour 0-23, day 1-31, month 1-12, weekday 0-6) and rejects the whole workflow file otherwise
+#     - minimum interval is every 5 minutes, and named shortcuts (@daily etc.) are not supported
+#
+# Apply:      git apply 01-simple/028-cron-out-of-range.diff
+diff --git a/.github/workflows/nightly.yml b/.github/workflows/nightly.yml
+--- a/.github/workflows/nightly.yml
++++ b/.github/workflows/nightly.yml
+@@ -2,11 +2,13 @@
+ 
+ on:
+   schedule:
+-    - cron: "0 25 * * *"
++    - cron: "0 23 * * *"
+ 
+ jobs:
+   smoke:
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v4
++      - name: Install dependencies
++        run: npm ci
+       - run: npm test

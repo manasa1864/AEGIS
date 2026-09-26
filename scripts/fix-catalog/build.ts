@@ -19,6 +19,7 @@ export interface BuiltEntry {
 export function repoFor(entry: CatalogEntry): Files {
   const byPath = new Map(BASE_FILES.map(f => [f.path, f.content]));
   for (const f of entry.files ?? []) byPath.set(f.path, f.content);
+  for (const path of entry.remove ?? []) byPath.delete(path);
   return [...byPath.entries()].map(([path, content]) => ({ path, content }));
 }
 

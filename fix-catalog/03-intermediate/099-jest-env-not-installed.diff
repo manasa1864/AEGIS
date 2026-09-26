@@ -1,0 +1,23 @@
+# Aegis fix catalog #099 — Jest 28+ with testEnvironment 'jsdom' that is not installed
+#
+# Tier:       3 · Intermediate
+# Category:   test_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Test environment jest-environment-jsdom cannot be found. Make sure the testEnvironment configuration option points to an existing node module.
+#
+# How it is solved:
+#   MODIFY jest.config.js
+#     - Set testEnvironment to 'node' in jest.config.js — 'jsdom' is not installed (Jest 28+ no longer bundles it) and package.json has no browser/UI dependency, so the tests need no DOM
+#
+# Apply:      git apply 03-intermediate/099-jest-env-not-installed.diff
+diff --git a/jest.config.js b/jest.config.js
+--- a/jest.config.js
++++ b/jest.config.js
+@@ -1,4 +1,4 @@
+ module.exports = {
+   preset: 'ts-jest',
+-  testEnvironment: 'jsdom',
++  testEnvironment: 'node',
+ };

@@ -1,0 +1,27 @@
+# Aegis fix catalog #110 — Port already allocated on the runner
+#
+# Tier:       4 · Advanced
+# Category:   port_conflict (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error response from daemon: driver failed programming external connectivity: Bind for 0.0.0.0:5432 failed: port is already allocated
+#   | Error: listen EADDRINUSE: address already in use :::3000
+#
+# How it is solved:
+#   MODIFY docker-compose.yml
+#     - Remapped host port 3000 → 3001 — port was already bound by another process
+#
+# Apply:      git apply 04-advanced/110-port_conflict.diff
+diff --git a/docker-compose.yml b/docker-compose.yml
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -3,7 +3,7 @@
+   app:
+     build: .
+     ports:
+-      - "3000:3000"
++      - "3001:3000"  # aegis: port 3000 was in use, remapped
+     depends_on:
+       - db
+   db:

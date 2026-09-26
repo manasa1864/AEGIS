@@ -543,9 +543,18 @@ import {
   fixCompilerSuggestions,
   fixUnusedImports, fixPythonUnusedImports, fixPreferConst, fixDebuggerStatements,
   fixWhitespaceLint, fixFocusedTests, fixUnusedTsExpectError, fixNullDerefAtStackFrame,
-  fixMissingNpmPackage, fixMissingPythonPackage,
-  isAppSourceFile, logReferencedSourcePaths,
+  fixMissingPythonPackage, fixEslintRuleViolations, fixPythonLintViolations, fixMissingExport,
+  fixPythonModulePath, fixPyYamlLoad,
+  isAppSourceFile, logReferencedSourcePaths, withStableLineNumbers, hasLinePlaceholders, stripLinePlaceholders,
 } from './fixers/code/source';
+import {
+  fixMissingNpmPackage, fixUnavailablePinnedVersion, fixIncompatiblePythonPins, fixVulnerableDependencies,
+  fixJestEnvironmentMissing, fixNodeEngineMismatch, fixMissingRequirementsFile, fixVirtualenvNotCreated, fixArtifactPathMismatch,
+} from './fixers/code/manifests';
+import {
+  fixComposeHostPortCollision, fixK8sSelectorLabelMismatch, fixDockerfilePath, fixDockerfileUnknownInstruction, fixMissingBindSource,
+  fixZeroRevisionHistory,
+} from './fixers/advanced/infraStatic';
 
 import { isYamlPath, yamlParseError } from './yamlCheck';
 
@@ -553,13 +562,135 @@ import { isYamlPath, yamlParseError } from './yamlCheck';
  *  would have made a valid YAML file unparseable (diagnostics / tests). */
 export const rejectedRules: Array<{ path: string; explanation: string; error: string; before?: string; after?: string }> = [];
 
+// ── Repair-only policy ───────────────────────────────────────────────────────
+//
+// Rules that read the CI logs act only on the failure they describe. Rules that
+// read only file content would fire on every repo, so during healing they run
+// only when the change is a repair:
+//   • always-run rules must be in STATIC_REPAIRS — they fix a definition that is
+//     invalid on its own (the runner, parser or API rejects it), so no log is needed;
+//   • rules inside a diagnosed-category block run unless they are in HARDENING —
+//     optional improvements (caching, probes, notifications, env niceties, style)
+//     that do not fix the failure.
+// { hardening: true } restores every rule, for audits that want the improvements too.
+
+type FileRule = (files: Array<{ path: string; content: string }>) => RuleFix[];
+
+const STATIC_REPAIRS = new Set<FileRule>([
+  // YAML / workflow definitions GitHub or GitLab refuse to run
+  fixYamlTabIndentation, fixDuplicateYamlKey, fixDuplicateEnvKey, fixDuplicatePermissions, fixDuplicateGitLabStage,
+  fixIncorrectConfigHierarchy, fixIncorrectExpressionDelimiter, fixStepUsesAndRun, fixStepUsesAndRunConflict,
+  fixMissingWorkflowTrigger, fixWorkflowTriggerTypo, fixMissingWorkflowCallTrigger, fixInvalidCronExpression,
+  fixRunnerLabelTypo, fixRetentionDaysType, fixDenyLicensesType, fixDeprecatedSetEnv, fixPushBranchFilter,
+  fixGitLabStageOrder, fixMergeConflictMarkers,
+  // expressions that silently evaluate to empty (outputs, needs, matrix, env/if scoping)
+  fixQuotedExpressionLiteral, fixMissingJobOutputs, fixMissingJobOutputsDeclaration, fixJobOutputDeclaration,
+  fixMissingStepIdForOutput, fixNeedsContextKeyMismatch, fixStepOutputScopeError, fixWrongResultValueInIf,
+  fixEnvContextScope, fixMatrixNodeVersionKey, fixMissingDispatchInputs,
+  // steps guaranteed to fail on the runner
+  fixNpmCacheNolockfile, fixNpmCiToInstall, fixAptGetSudo, fixBashSyntaxInPosixSh, fixLinuxCommandsOnWindows,
+  fixMissingCheckoutStep, fixAddInstallStep, fixMissingYarnInstallStep, fixMissingReportsDir, fixDownloadAfterUpload,
+  fixPostgresServiceConfig, fixSonarCloudConfig,
+  // infrastructure definitions the runtime rejects
+  fixDuplicateDockerPort, fixComposeHostPortCollision, fixK8sSelectorLabelMismatch,
+]);
+
+const HARDENING = new Set<FileRule>([
+  // caching / performance
+  fixNpmCacheRestoreKeys, fixSetupActionBuiltinCache, fixRustCargoCache, fixGitLabMissingCache, fixGitLabCachePolicy,
+  fixPipNoCacheDir, fixMakeParallelJobs, fixViteProductionBuild, fixGitLabIncrementalPipeline, fixGitLabDAGPipeline,
+  fixDockerBuildKitCacheMount, fixDockerGHACacheMount, fixDockerRegistryLayerCache, fixDockerServicePullPolicy,
+  fixDockerCopyOrderForCache, fixDockerRUNLayerMerge, fixDockerAPTGetUpdate, fixDockerLayerCleanup, fixDockerPipNoCacheDir,
+  fixDockerNPMInstallProd, fixMavenBuildScript,
+  // container / cluster hardening
+  fixDockerBaseImagePin, fixDockerImageDigestPin, fixDockerCredentialHelper, fixDockerEntrypointEnvCheck,
+  fixDockerStartupHealthcheck, fixDockerStopSignal, fixDockerTimezone, fixDockerTiniInit, fixDockerComposeInit,
+  fixDockerLoggingConfig, fixDockerNamedVolumes, fixDockerVolumeReadOnly, fixDockerShellToExecForm,
+  fixDockerfileAddVsCopy, fixDockerfileCmdEntrypointInteraction, fixDockerfileLabelFormat, fixDockerfileNonRootUser,
+  fixDockerfileWorkdirAbsolute, fixDockerignoreSecrets, fixDockerMissingDockerignore, fixMissingDockerignore,
+  fixDockerComposePortFormat, fixDockerMetadataAction, fixDockerComposeBuildService, fixDockerImageHealthProbe,
+  fixServiceHPAMinReplicas, fixServicePodDisruptionBudget, fixServiceReadinessGate, fixServiceTopologySpread,
+  fixK8sRollbackHistoryLimit, fixK8sRolloutWait, fixKubectlRollbackAnnotation, fixArgoRollbackSyncWave,
+  fixDeployRollbackOnFailure, fixNextJsBuildConfig, fixNuxtNitroPreset,
+  // deploy policy / workflow structure preferences
+  fixConcurrentDeployPrevention, fixProdDeployBranchGuard, fixProdDeployGatingJob, fixDeployTaggedRelease,
+  fixSSHDeployNonBlocking, fixBarrierGateJob, fixMatrixFanInSummary, fixMatrixArtifactFanIn, fixFailFastMatrix,
+  fixWorkflowLevelEnvSharing, fixConcurrencyForPR, fixMissingConcurrencyGroup, fixPathFilterTrigger, fixPushTagsPattern,
+  fixWorkflowCallContract, fixWorkflowDispatchInputs, fixMissingWorkflowName, fixReusableWorkflowPin,
+  fixIfAlwaysSyntax, fixWorkflowIfCondition, fixPullRequestTargetSecurity, fixPipelineFailureNotification,
+  fixArtifactIfNoFilesFound, fixGitLabArtifactConfig, fixGitLabEnvironmentConfig, fixGitLabResourceGroup,
+  fixGitLabRulesNeverMatch, fixGitLabStageOrdering, fixGitLabVariableScope, fixGitLabWorkflowRules, fixRebaseBeforeMerge,
+  fixLambdaZipPackage, fixHelmChartPackage, fixNuGetPackageOutput, fixPythonWheelBuild, fixRakeTask,
+  fixTailwindContentPaths, fixSvelteKitAdapter,
+  // env-var niceties and placeholder files
+  fixCargoEnvVars, fixGoEnvVars, fixJavaEnvVars, fixPythonEnvVars, fixTerraformEnvVars, fixRESTBaseURLEnvVar,
+  fixRESTEndpointEnvMatrix, fixCreateDotEnvExample, fixInputToEnvMapping, fixMissingSecretsContext,
+  fixUndeclaredEnvVarReference, fixEventInputScope, fixRustToolchainFile,
+  // replaced by log-driven, working-directory-aware rules (fixMissingRequirementsFile, fixNodeEngineMismatch,
+  // fixDockerfilePath) — writing a requirements.txt or Dockerfile from scratch is a guess, not a repair
+  fixCreateRequirementsTxt, fixCreateMinimalDockerfile,
+]);
+
+// ── Masking guard ────────────────────────────────────────────────────────────
+// A heal must fix the failure, not switch the check off. Edits that newly make a
+// failing step/job non-blocking, swallow its exit code, or lower a quality bar
+// turn CI green without healing anything — they are rejected while healing.
+
+const MASKING_LINE: Array<[RegExp, string]> = [
+  [/^\s*continue-on-error:\s*true\b/, 'makes the step/job non-blocking (continue-on-error)'],
+  [/^\s*allow_failure:\s*true\b/, 'makes the GitLab job non-blocking (allow_failure)'],
+  [/\|\|\s*(?:true|:|exit\s+0)\s*(?:#.*)?$/, "swallows the command's exit code (|| true)"],
+  [/fail_ci_if_error:\s*false/, 'ignores upload failures (fail_ci_if_error: false)'],
+  [/--passWithNoTests\b/, 'passes a test run that ran no tests'],
+];
+
+/** Why `after` masks a failure that `before` would report — null when it does not. */
+export function maskingReason(before: string | undefined, after: string): string | null {
+  const had = new Set((before ?? '').split('\n').map(l => l.trim()));
+  for (const line of after.split('\n')) {
+    if (had.has(line.trim())) continue;
+    for (const [re, why] of MASKING_LINE) if (re.test(line)) return why;
+  }
+  // lowered coverage thresholds (jest/vitest/nyc/pytest-cov)
+  const thresholds = (text: string) => new Map([...text.matchAll(/\b(branches|functions|lines|statements|fail[_-]under)["']?\s*[:=]\s*(\d+(?:\.\d+)?)/gi)].map(m => [m[1].toLowerCase(), +m[2]]));
+  if (before) {
+    const was = thresholds(before);
+    for (const [k, v] of thresholds(after)) if (was.has(k) && v < was.get(k)!) return `lowers the ${k} coverage threshold (${was.get(k)} → ${v})`;
+  }
+  return null;
+}
+
 // ── Orchestrator ─────────────────────────────────────────────────────────────
+
+export interface RuleOptions {
+  /** Also run optional hardening rules that do not fix the failure (off while healing). */
+  hardening?: boolean;
+  /** Complete job logs, for the rules that parse exact tool output — whole reports (npm audit /
+   *  pip-audit tables, pip build output) and every compiler/linter row (the error-focused text
+   *  is size-capped and can drop rows). Every other rule reads `logs`: full logs also carry
+   *  setup chatter (checkout, deprecation notices) that would trigger keyword-matched rules. */
+  reportLogs?: string;
+}
+
+/** CI log text as tools printed it: runner timestamps, "##[error]" annotations and
+ *  ANSI colours removed, indentation kept — every rule parses this form. */
+export function normalizeCiLog(logs: string): string {
+  return logs.split('\n').map(l => l
+    .replace(/\u001b\[[0-9;]*m/g, '')                         // eslint-disable-line no-control-regex
+    .replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s?/, '')
+    .replace(/^##\[(?:error|warning|notice|debug|group|endgroup)\]/, '')
+    .replace(/\r$/, ''),
+  ).join('\n');
+}
 
 export function applyRuleBasedFixes(
   category: ErrorCategory | ErrorCategory[],
-  logs: string,
+  rawLogs: string,
   files: Array<{ path: string; content: string }>,
+  options: RuleOptions = {},
 ): RuleFix[] {
+  const logs = normalizeCiLog(rawLogs);
+  const reportLogs = options.reportLogs ? normalizeCiLog(options.reportLogs) : logs;
   // Accept a single category or the full ranked list from categorizeAllErrors.
   // hasCategory fires the fix block when ANY detected category matches —
   // this means simultaneous failures (lint + missing dep + docker auth) all
@@ -589,6 +720,11 @@ export function applyRuleBasedFixes(
       // (always-run + category block). The same rule must not apply twice to a
       // file — non-idempotent rules would insert their step/block again.
       if (explanations.get(fix.path)?.includes(fix.explanation)) continue;
+      // Heal, don't hide: an edit that only silences the failing check is not a fix.
+      if (!options.hardening) {
+        const masked = maskingReason(working.get(fix.path), fix.content);
+        if (masked) { rejectedRules.push({ path: fix.path, explanation: fix.explanation, error: `masks the failure: ${masked}` }); continue; }
+      }
       // Composition safety: one rule that breaks YAML must not poison every
       // other rule's fix to the same file — drop just that rule's edit.
       if (isYamlPath(fix.path)) {
@@ -621,6 +757,11 @@ export function applyRuleBasedFixes(
       .filter(([path, content]) => path && typeof path === 'string' && typeof content === 'string')
       .map(([path, content]) => ({ path, content }));
 
+  // File-only rules go through the repair-only policy (see STATIC_REPAIRS / HARDENING).
+  const hardening = options.hardening ?? false;
+  const staticRule = (fix: FileRule) => { if (hardening || STATIC_REPAIRS.has(fix)) applyBatch(fix(snap())); };
+  const categoryRule = (fix: FileRule) => { if (hardening || !HARDENING.has(fix)) applyBatch(fix(snap())); };
+
   // Application source is edited only by the surgical fixers in fixers/code,
   // which act on the exact file:line a CI log names. The older runtime fixers
   // rewrite whole files (every Promise.all, every `.prop`, TS syntax injected
@@ -635,173 +776,173 @@ export function applyRuleBasedFixes(
   // ════════════════════════════════════════════════════════════════════════
   // SIMPLE — always-run rules (file-content based, safe for any category)
   // ════════════════════════════════════════════════════════════════════════
-  applyBatch(fixYamlTabIndentation(snap()));
-  applyBatch(fixYamlIndentationDepth(snap()));
-  applyBatch(fixDuplicateYamlKey(snap()));
+  staticRule(fixYamlTabIndentation);
+  staticRule(fixYamlIndentationDepth);
+  staticRule(fixDuplicateYamlKey);
   applyBatch(fixMissingYamlColon(logs, snap()));
-  applyBatch(fixIncorrectYamlBooleans(snap()));
-  applyBatch(fixIncorrectExpressionDelimiter(snap()));
-  applyBatch(fixStepUsesAndRun(snap()));
-  applyBatch(fixMissingWorkflowTrigger(snap()));
-  applyBatch(fixWorkflowTriggerTypo(snap()));
-  applyBatch(fixIncorrectConfigHierarchy(snap()));
-  applyBatch(fixMissingShebang(snap()));
-  applyBatch(fixAptGetSudo(snap()));
-  applyBatch(fixNpmCacheNolockfile(snap()));
-  applyBatch(fixNpmCiToInstall(snap()));
-  applyBatch(fixCodecovNonBlocking(snap()));
-  applyBatch(fixArtifactIfNoFilesError(snap()));
-  applyBatch(fixGradleWrapperPermission(snap()));
-  applyBatch(fixPnpmWorkspaceBuild(snap()));
-  applyBatch(fixCargoWorkspaceBuild(snap()));
-  applyBatch(fixNextJsBuildConfig(snap()));
-  applyBatch(fixPython2to3(snap()));
-  applyBatch(fixRustToolchainFile(snap()));
-  applyBatch(fixPrismaGenerate(snap()));
-  applyBatch(fixGoGenerateStep(snap()));
+  staticRule(fixIncorrectYamlBooleans);
+  staticRule(fixIncorrectExpressionDelimiter);
+  staticRule(fixStepUsesAndRun);
+  staticRule(fixMissingWorkflowTrigger);
+  staticRule(fixWorkflowTriggerTypo);
+  staticRule(fixIncorrectConfigHierarchy);
+  staticRule(fixMissingShebang);
+  staticRule(fixAptGetSudo);
+  staticRule(fixNpmCacheNolockfile);
+  staticRule(fixNpmCiToInstall);
+  staticRule(fixCodecovNonBlocking);
+  staticRule(fixArtifactIfNoFilesError);
+  staticRule(fixGradleWrapperPermission);
+  staticRule(fixPnpmWorkspaceBuild);
+  staticRule(fixCargoWorkspaceBuild);
+  staticRule(fixNextJsBuildConfig);
+  staticRule(fixPython2to3);
+  staticRule(fixRustToolchainFile);
+  staticRule(fixPrismaGenerate);
+  staticRule(fixGoGenerateStep);
   applyBatch(fixLernaBootstrap(logs, snap()));
-  applyBatch(fixMakeParallelJobs(snap()));
-  applyBatch(fixTailwindContentPaths(snap()));
-  applyBatch(fixSvelteKitAdapter(snap()));
-  applyBatch(fixRakeTask(snap()));
+  staticRule(fixMakeParallelJobs);
+  staticRule(fixTailwindContentPaths);
+  staticRule(fixSvelteKitAdapter);
+  staticRule(fixRakeTask);
   applyBatch(fixRubyNativeExtensions(logs, snap()));
   applyBatch(fixFlutterSDKConstraint(logs, snap()));
-  applyBatch(fixMissingNodeEnv(snap()));
-  applyBatch(fixMissingCIEnvFlag(snap()));
-  applyBatch(fixPromoteRepeatedEnvVars(snap()));
-  applyBatch(fixVariableScopeIssue(snap()));
-  applyBatch(fixAddInstallStep(snap()));
-  applyBatch(fixMissingYarnInstallStep(snap()));
-  applyBatch(fixMissingComposerInstall(snap()));
-  applyBatch(fixMissingPoetryInstall(snap()));
-  applyBatch(fixMissingPipenvInstall(snap()));
-  applyBatch(fixMissingSetupPython(snap()));
-  applyBatch(fixMissingSetupJava(snap()));
-  applyBatch(fixMissingSetupGo(snap()));
-  applyBatch(fixCondaEnvironmentSetup(snap()));
-  applyBatch(fixNpmEnginesCheck(snap()));
-  applyBatch(fixNvmrcVersionMismatch(snap()));
-  applyBatch(fixNpmCacheRestoreKeys(snap()));
-  applyBatch(fixPipCache(snap()));
-  applyBatch(fixMavenCache(snap()));
-  applyBatch(fixGradleCache(snap()));
-  applyBatch(fixComposerCache(snap()));
-  applyBatch(fixGoModCache(snap()));
-  applyBatch(fixCreateRequirementsTxt(snap()));
-  applyBatch(fixRequirementsPinning(snap()));
-  applyBatch(fixPipNoCacheDir(snap()));
-  applyBatch(fixNpmRegistryAuth(snap()));
-  applyBatch(fixPipPrivateIndex(snap()));
-  applyBatch(fixCreateDotEnvExample(snap()));
+  staticRule(fixMissingNodeEnv);
+  staticRule(fixMissingCIEnvFlag);
+  staticRule(fixPromoteRepeatedEnvVars);
+  staticRule(fixVariableScopeIssue);
+  staticRule(fixAddInstallStep);
+  staticRule(fixMissingYarnInstallStep);
+  staticRule(fixMissingComposerInstall);
+  staticRule(fixMissingPoetryInstall);
+  staticRule(fixMissingPipenvInstall);
+  staticRule(fixMissingSetupPython);
+  staticRule(fixMissingSetupJava);
+  staticRule(fixMissingSetupGo);
+  staticRule(fixCondaEnvironmentSetup);
+  staticRule(fixNpmEnginesCheck);
+  staticRule(fixNvmrcVersionMismatch);
+  staticRule(fixNpmCacheRestoreKeys);
+  staticRule(fixPipCache);
+  staticRule(fixMavenCache);
+  staticRule(fixGradleCache);
+  staticRule(fixComposerCache);
+  staticRule(fixGoModCache);
+  staticRule(fixCreateRequirementsTxt);
+  staticRule(fixRequirementsPinning);
+  staticRule(fixPipNoCacheDir);
+  staticRule(fixNpmRegistryAuth);
+  staticRule(fixPipPrivateIndex);
+  staticRule(fixCreateDotEnvExample);
   // NEW always-run: syntax + environment + deps + build
-  applyBatch(fixRunnerLabelTypo(snap()));
-  applyBatch(fixMissingCheckoutStep(snap()));
-  applyBatch(fixInvalidCronExpression(snap()));
-  applyBatch(fixGitLabOnlyExceptToRules(snap()));
-  applyBatch(fixMultilineRunScript(snap()));
-  applyBatch(fixMissingWorkflowCallTrigger(snap()));
-  applyBatch(fixLinuxCommandsOnWindows(snap()));
-  applyBatch(fixBashSyntaxInPosixSh(snap()));
-  applyBatch(fixHardcodedSecretInYaml(snap()));
-  applyBatch(fixTerraformEnvVars(snap()));
-  applyBatch(fixDeprecatedSaveState(snap()));
-  applyBatch(fixMissingGitHubTokenPermissions(snap()));
-  applyBatch(fixGitLabVariableMasking(snap()));
-  applyBatch(fixIncorrectNodeEnvValue(snap()));
-  applyBatch(fixDotEnvInGitignore(snap()));
-  applyBatch(fixUndeclaredEnvVarReference(snap()));
-  applyBatch(fixMissingNpmPublishToken(snap()));
-  applyBatch(fixMissingDockerRegistrySecrets(snap()));
-  applyBatch(fixMissingAwsRegion(snap()));
-  applyBatch(fixPythonEnvVars(snap()));
-  applyBatch(fixJavaEnvVars(snap()));
-  applyBatch(fixGoEnvVars(snap()));
-  applyBatch(fixCargoEnvVars(snap()));
-  applyBatch(fixStepOutputScopeError(snap()));
-  applyBatch(fixMissingJobOutputsDeclaration(snap()));
-  applyBatch(fixEventInputScope(snap()));
-  applyBatch(fixDotNetEnvVars(snap()));
-  applyBatch(fixRubyEnvVars(snap()));
-  applyBatch(fixPhpEnvVars(snap()));
-  applyBatch(fixGoogleCloudEnvVars(snap()));
-  applyBatch(fixAzureEnvVars(snap()));
-  applyBatch(fixVercelDeployEnvVars(snap()));
-  applyBatch(fixSentryEnvVars(snap()));
-  applyBatch(fixSecretsInheritance(snap()));
-  applyBatch(fixExportVarCrossStep(snap()));
-  applyBatch(fixMissingSecretsContextUsage(snap()));
-  applyBatch(fixHuskyCI(snap()));
-  applyBatch(fixMavenWrapperPermission(snap()));
-  applyBatch(fixYarnBerrySetup(snap()));
-  applyBatch(fixMissingEditorConfig(snap()));
-  applyBatch(fixArtifactRetentionDays(snap()));
-  applyBatch(fixRetentionDaysType(snap()));
-  applyBatch(fixDenyLicensesType(snap()));
-  applyBatch(fixContentsNonePermission(snap()));
-  applyBatch(fixQuotedExpressionLiteral(snap()));
-  applyBatch(fixExternalServiceJobNonBlocking(snap()));
-  applyBatch(fixFailFastMatrix(snap()));
-  applyBatch(fixGitLabMissingCache(snap()));
+  staticRule(fixRunnerLabelTypo);
+  staticRule(fixMissingCheckoutStep);
+  staticRule(fixInvalidCronExpression);
+  staticRule(fixGitLabOnlyExceptToRules);
+  staticRule(fixMultilineRunScript);
+  staticRule(fixMissingWorkflowCallTrigger);
+  staticRule(fixLinuxCommandsOnWindows);
+  staticRule(fixBashSyntaxInPosixSh);
+  staticRule(fixHardcodedSecretInYaml);
+  staticRule(fixTerraformEnvVars);
+  staticRule(fixDeprecatedSaveState);
+  staticRule(fixMissingGitHubTokenPermissions);
+  staticRule(fixGitLabVariableMasking);
+  staticRule(fixIncorrectNodeEnvValue);
+  staticRule(fixDotEnvInGitignore);
+  staticRule(fixUndeclaredEnvVarReference);
+  staticRule(fixMissingNpmPublishToken);
+  staticRule(fixMissingDockerRegistrySecrets);
+  staticRule(fixMissingAwsRegion);
+  staticRule(fixPythonEnvVars);
+  staticRule(fixJavaEnvVars);
+  staticRule(fixGoEnvVars);
+  staticRule(fixCargoEnvVars);
+  staticRule(fixStepOutputScopeError);
+  staticRule(fixMissingJobOutputsDeclaration);
+  staticRule(fixEventInputScope);
+  staticRule(fixDotNetEnvVars);
+  staticRule(fixRubyEnvVars);
+  staticRule(fixPhpEnvVars);
+  staticRule(fixGoogleCloudEnvVars);
+  staticRule(fixAzureEnvVars);
+  staticRule(fixVercelDeployEnvVars);
+  staticRule(fixSentryEnvVars);
+  staticRule(fixSecretsInheritance);
+  staticRule(fixExportVarCrossStep);
+  staticRule(fixMissingSecretsContextUsage);
+  staticRule(fixHuskyCI);
+  staticRule(fixMavenWrapperPermission);
+  staticRule(fixYarnBerrySetup);
+  staticRule(fixMissingEditorConfig);
+  staticRule(fixArtifactRetentionDays);
+  staticRule(fixRetentionDaysType);
+  staticRule(fixDenyLicensesType);
+  staticRule(fixContentsNonePermission);
+  staticRule(fixQuotedExpressionLiteral);
+  staticRule(fixExternalServiceJobNonBlocking);
+  staticRule(fixFailFastMatrix);
+  staticRule(fixGitLabMissingCache);
 
   // ════════════════════════════════════════════════════════════════════════
   // INTERMEDIATE — always-run pipeline + git hygiene rules
   // ════════════════════════════════════════════════════════════════════════
-  applyBatch(fixDeprecatedSetOutput(snap()));
-  applyBatch(fixDeprecatedSetEnv(snap()));
-  applyBatch(fixMergeConflictMarkers(snap()));
-  applyBatch(fixGitLabStageOrder(snap()));
-  applyBatch(fixGitLabOptionalStages(snap()));
-  applyBatch(fixMissingJobNeeds(snap()));
-  applyBatch(fixSecurityJobNonBlocking(snap()));
-  applyBatch(fixMissingReportsDir(snap()));
-  applyBatch(fixMissingDispatchInputs(snap()));
-  applyBatch(fixGitLabIncludePath(snap()));
+  staticRule(fixDeprecatedSetOutput);
+  staticRule(fixDeprecatedSetEnv);
+  staticRule(fixMergeConflictMarkers);
+  staticRule(fixGitLabStageOrder);
+  staticRule(fixGitLabOptionalStages);
+  staticRule(fixMissingJobNeeds);
+  staticRule(fixSecurityJobNonBlocking);
+  staticRule(fixMissingReportsDir);
+  staticRule(fixMissingDispatchInputs);
+  staticRule(fixGitLabIncludePath);
   // NEW always-run: git + pipeline + config hygiene
-  applyBatch(fixHuskyPreCommitCI(snap()));
-  applyBatch(fixMissingJobOutputs(snap()));
-  applyBatch(fixRecursivePipelineTrigger(snap()));
+  staticRule(fixHuskyPreCommitCI);
+  staticRule(fixMissingJobOutputs);
+  staticRule(fixRecursivePipelineTrigger);
   applyBatch(fixGitLineEndings(logs, snap()));
-  applyBatch(fixGitLabDefaultBranch(snap()));
+  staticRule(fixGitLabDefaultBranch);
   // Config always-run
-  applyBatch(fixMissingWorkflowName(snap()));
-  applyBatch(fixIfAlwaysSyntax(snap()));
-  applyBatch(fixWorkflowIfCondition(snap()));
-  applyBatch(fixStepUsesAndRunConflict(snap()));
-  applyBatch(fixDuplicateEnvKey(snap()));
-  applyBatch(fixDuplicatePermissions(snap()));
-  applyBatch(fixDockerComposeVersionField(snap()));
-  applyBatch(fixGitLabWorkflowRules(snap()));
-  applyBatch(fixGitLabResourceGroup(snap()));
-  applyBatch(fixGitLabEnvironmentConfig(snap()));
-  applyBatch(fixGitLabRulesNeverMatch(snap()));
-  applyBatch(fixMissingDockerignore(snap()));
-  applyBatch(fixDockerMissingDockerignore(snap()));
-  applyBatch(fixMissingSecretsContext(snap()));
-  applyBatch(fixSecretToEnvMapping(snap()));
-  applyBatch(fixEnvContextScope(snap()));
-  applyBatch(fixReusableWorkflowPin(snap()));
+  staticRule(fixMissingWorkflowName);
+  staticRule(fixIfAlwaysSyntax);
+  staticRule(fixWorkflowIfCondition);
+  staticRule(fixStepUsesAndRunConflict);
+  staticRule(fixDuplicateEnvKey);
+  staticRule(fixDuplicatePermissions);
+  staticRule(fixDockerComposeVersionField);
+  staticRule(fixGitLabWorkflowRules);
+  staticRule(fixGitLabResourceGroup);
+  staticRule(fixGitLabEnvironmentConfig);
+  staticRule(fixGitLabRulesNeverMatch);
+  staticRule(fixMissingDockerignore);
+  staticRule(fixDockerMissingDockerignore);
+  staticRule(fixMissingSecretsContext);
+  staticRule(fixSecretToEnvMapping);
+  staticRule(fixEnvContextScope);
+  staticRule(fixReusableWorkflowPin);
   // Pipeline always-run
-  applyBatch(fixConcurrencyForPR(snap()));
-  applyBatch(fixPullRequestTargetSecurity(snap()));
-  applyBatch(fixPushTagsPattern(snap()));
-  applyBatch(fixPathFilterTrigger(snap()));
-  applyBatch(fixArtifactIfNoFilesFound(snap()));
-  applyBatch(fixCacheRestoreKeys(snap()));
-  applyBatch(fixSetupActionBuiltinCache(snap()));
-  applyBatch(fixCacheKeyHashFiles(snap()));
-  applyBatch(fixGitLabArtifactConfig(snap()));
-  applyBatch(fixGitLabCachePolicy(snap()));
-  applyBatch(fixWorkflowDispatchInputs(snap()));
-  applyBatch(fixJobOrderingWithNeeds(snap()));
+  staticRule(fixConcurrencyForPR);
+  staticRule(fixPullRequestTargetSecurity);
+  staticRule(fixPushTagsPattern);
+  staticRule(fixPathFilterTrigger);
+  staticRule(fixArtifactIfNoFilesFound);
+  staticRule(fixCacheRestoreKeys);
+  staticRule(fixSetupActionBuiltinCache);
+  staticRule(fixCacheKeyHashFiles);
+  staticRule(fixGitLabArtifactConfig);
+  staticRule(fixGitLabCachePolicy);
+  staticRule(fixWorkflowDispatchInputs);
+  staticRule(fixJobOrderingWithNeeds);
   applyBatch(fixDanglingNeedsReference(logs, snap()));
-  applyBatch(fixNeedsContextKeyMismatch(snap()));
-  applyBatch(fixWrongResultValueInIf(snap()));
-  applyBatch(fixMatrixNodeVersionKey(snap()));
-  applyBatch(fixMissingStepIdForOutput(snap()));
-  applyBatch(fixSonarCloudConfig(snap()));
-  applyBatch(fixPostgresServiceConfig(snap()));
-  applyBatch(fixBarrierGateJob(snap()));
-  applyBatch(fixWorkflowLevelEnvSharing(snap()));
+  staticRule(fixNeedsContextKeyMismatch);
+  staticRule(fixWrongResultValueInIf);
+  staticRule(fixMatrixNodeVersionKey);
+  staticRule(fixMissingStepIdForOutput);
+  staticRule(fixSonarCloudConfig);
+  staticRule(fixPostgresServiceConfig);
+  staticRule(fixBarrierGateJob);
+  staticRule(fixWorkflowLevelEnvSharing);
 
   // Runtime always-run
   applyBatch(fixStrictNullChecks(logs, snap()));
@@ -816,24 +957,24 @@ export function applyRuleBasedFixes(
   applyBatch(fixAsyncTryCatch(logs, snap()));
 
   // Advanced always-run rules
-  applyBatch(fixMissingDockerignore(snap()));
-  applyBatch(fixDockerMissingDockerignore(snap()));
-  applyBatch(fixDockerBaseImagePin(snap()));
-  applyBatch(fixEnableDockerBuildKit(snap()));
-  applyBatch(fixSlackNotificationSecret(snap()));
-  applyBatch(fixGitLabDeployEnvironment(snap()));
-  applyBatch(fixSSHDeployNonBlocking(snap()));
-  applyBatch(fixK8sRolloutWait(snap()));
+  staticRule(fixMissingDockerignore);
+  staticRule(fixDockerMissingDockerignore);
+  staticRule(fixDockerBaseImagePin);
+  staticRule(fixEnableDockerBuildKit);
+  staticRule(fixSlackNotificationSecret);
+  staticRule(fixGitLabDeployEnvironment);
+  staticRule(fixSSHDeployNonBlocking);
+  staticRule(fixK8sRolloutWait);
 
   // ════════════════════════════════════════════════════════════════════════
   // CATEGORY-SPECIFIC rules — targeted at the diagnosed failure type
   // ════════════════════════════════════════════════════════════════════════
 
   if (hasCategory('docker_auth')) {
-    applyBatch(fixDockerJobOnPushOnly(snap()));
-    applyBatch(fixDockerAndDeployJobsNonBlocking(snap()));
-    applyBatch(fixCreateMinimalDockerfile(snap()));
-    applyBatch(fixGitLabDockerJobGuard(snap()));
+    categoryRule(fixDockerJobOnPushOnly);
+    categoryRule(fixDockerAndDeployJobsNonBlocking);
+    categoryRule(fixCreateMinimalDockerfile);
+    categoryRule(fixGitLabDockerJobGuard);
     applyBatch(fixDockerHubTokenExpiry(logs, snap()));
     applyBatch(fixPackagesWritePermission(logs, snap()));
     applyBatch(fixPackagesReadPermission(logs, snap()));
@@ -849,88 +990,88 @@ export function applyRuleBasedFixes(
     applyBatch(fixDockerGARLoginStep(logs, snap()));
     applyBatch(fixDockerHubAccessToken(logs, snap()));
     applyBatch(fixDockerPrivateRegistryCA(logs, snap()));
-    applyBatch(fixDockerCredentialHelper(snap()));
+    categoryRule(fixDockerCredentialHelper);
   }
 
   if (hasCategory('docker_rate_limit')) {
     applyBatch(fixDockerHubRateLimit(logs, snap()));
-    applyBatch(fixDockerJobOnPushOnly(snap()));
+    categoryRule(fixDockerJobOnPushOnly);
   }
 
   if (hasCategory('docker_build')) {
-    applyBatch(fixCreateMinimalDockerfile(snap()));
-    applyBatch(fixDockerBaseImagePin(snap()));
-    applyBatch(fixDockerPortExpose(snap()));
+    categoryRule(fixCreateMinimalDockerfile);
+    categoryRule(fixDockerBaseImagePin);
+    categoryRule(fixDockerPortExpose);
     applyBatch(fixMissingDockerLayer(logs, snap()));
     applyBatch(fixDockerImagePullFailure(logs, snap()));
     // Section A — Build failure extended
     applyBatch(fixDockerBuildContextTooLarge(logs, snap()));
     applyBatch(fixDockerBuildArgMissing(logs, snap()));
     applyBatch(fixDockerMultiStageBuild(logs, snap()));
-    applyBatch(fixDockerRUNLayerMerge(snap()));
-    applyBatch(fixDockerAPTGetUpdate(snap()));
-    applyBatch(fixDockerNPMInstallProd(snap()));
-    applyBatch(fixDockerPipNoCacheDir(snap()));
-    applyBatch(fixDockerCopyOrderForCache(snap()));
-    applyBatch(fixDockerShellToExecForm(snap()));
+    categoryRule(fixDockerRUNLayerMerge);
+    categoryRule(fixDockerAPTGetUpdate);
+    categoryRule(fixDockerNPMInstallProd);
+    categoryRule(fixDockerPipNoCacheDir);
+    categoryRule(fixDockerCopyOrderForCache);
+    categoryRule(fixDockerShellToExecForm);
     applyBatch(fixDockerBuildPlatformArg(logs, snap()));
     applyBatch(fixDockerQEMUSetup(logs, snap()));
-    applyBatch(fixDockerLayerCleanup(snap()));
+    categoryRule(fixDockerLayerCleanup);
     // Section B — Layer cache
-    applyBatch(fixDockerGHACacheMount(snap()));
-    applyBatch(fixDockerRegistryLayerCache(snap()));
+    categoryRule(fixDockerGHACacheMount);
+    categoryRule(fixDockerRegistryLayerCache);
     applyBatch(fixDockerManifestUnknown(logs, snap()));
     applyBatch(fixDockerPullRetryOnBlob(logs, snap()));
-    applyBatch(fixDockerBuildKitCacheMount(snap()));
-    applyBatch(fixDockerSetupBuildx(snap()));
-    applyBatch(fixDockerMetadataAction(snap()));
-    applyBatch(fixDockerServicePullPolicy(snap()));
+    categoryRule(fixDockerBuildKitCacheMount);
+    categoryRule(fixDockerSetupBuildx);
+    categoryRule(fixDockerMetadataAction);
+    categoryRule(fixDockerServicePullPolicy);
   }
 
   if (hasCategory('missing_docker_layer')) {
     applyBatch(fixMissingDockerLayer(logs, snap()));
-    applyBatch(fixDockerGHACacheMount(snap()));
-    applyBatch(fixDockerRegistryLayerCache(snap()));
+    categoryRule(fixDockerGHACacheMount);
+    categoryRule(fixDockerRegistryLayerCache);
     applyBatch(fixDockerManifestUnknown(logs, snap()));
     applyBatch(fixDockerPullRetryOnBlob(logs, snap()));
-    applyBatch(fixDockerBuildKitCacheMount(snap()));
-    applyBatch(fixDockerSetupBuildx(snap()));
-    applyBatch(fixDockerMetadataAction(snap()));
-    applyBatch(fixDockerServicePullPolicy(snap()));
+    categoryRule(fixDockerBuildKitCacheMount);
+    categoryRule(fixDockerSetupBuildx);
+    categoryRule(fixDockerMetadataAction);
+    categoryRule(fixDockerServicePullPolicy);
   }
 
   if (hasCategory('dockerfile_syntax')) {
     applyBatch(fixDockerfileHeredocSyntax(logs, snap()));
     applyBatch(fixDockerfileEnvVsArg(logs, snap()));
-    applyBatch(fixDockerfileCmdEntrypointInteraction(snap()));
+    categoryRule(fixDockerfileCmdEntrypointInteraction);
     applyBatch(fixDockerfileJSONArraySyntax(logs, snap()));
-    applyBatch(fixDockerfileAddVsCopy(snap()));
-    applyBatch(fixDockerfileWorkdirAbsolute(snap()));
-    applyBatch(fixDockerfileLabelFormat(snap()));
-    applyBatch(fixDockerfileNonRootUser(snap()));
-    applyBatch(fixDockerignoreSecrets(snap()));
+    categoryRule(fixDockerfileAddVsCopy);
+    categoryRule(fixDockerfileWorkdirAbsolute);
+    categoryRule(fixDockerfileLabelFormat);
+    categoryRule(fixDockerfileNonRootUser);
+    categoryRule(fixDockerignoreSecrets);
     applyBatch(fixDockerfileWildcardCopy(logs, snap()));
   }
 
   if (hasCategory('container_startup')) {
-    applyBatch(fixDockerTiniInit(snap()));
-    applyBatch(fixDockerEntrypointEnvCheck(snap()));
+    categoryRule(fixDockerTiniInit);
+    categoryRule(fixDockerEntrypointEnvCheck);
     applyBatch(fixDockerWaitForDependencies(logs, snap()));
-    applyBatch(fixDockerStopSignal(snap()));
-    applyBatch(fixDockerTimezone(snap()));
+    categoryRule(fixDockerStopSignal);
+    categoryRule(fixDockerTimezone);
     applyBatch(fixDockerUlimits(logs, snap()));
     applyBatch(fixDockerResourceLimits(logs, snap()));
     applyBatch(fixDockerRestartPolicy(logs, snap()));
-    applyBatch(fixDockerLoggingConfig(snap()));
-    applyBatch(fixDockerStartupHealthcheck(snap()));
+    categoryRule(fixDockerLoggingConfig);
+    categoryRule(fixDockerStartupHealthcheck);
   }
 
   if (hasCategory('container_health_failure')) {
     applyBatch(fixDockerHealthcheck(logs, snap()));
     applyBatch(fixWaitForDatabase(logs, snap()));
-    applyBatch(fixDockerStartupHealthcheck(snap()));
+    categoryRule(fixDockerStartupHealthcheck);
     applyBatch(fixDockerWaitForDependencies(logs, snap()));
-    applyBatch(fixDockerTiniInit(snap()));
+    categoryRule(fixDockerTiniInit);
   }
 
   if (hasCategory('registry_auth_failure')) {
@@ -940,24 +1081,24 @@ export function applyRuleBasedFixes(
     applyBatch(fixDockerGARLoginStep(logs, snap()));
     applyBatch(fixDockerHubAccessToken(logs, snap()));
     applyBatch(fixDockerPrivateRegistryCA(logs, snap()));
-    applyBatch(fixDockerCredentialHelper(snap()));
+    categoryRule(fixDockerCredentialHelper);
     applyBatch(fixDockerHubRateLimit(logs, snap()));
   }
 
   if (hasCategory('volume_mount_failure')) {
-    applyBatch(fixDockerNamedVolumes(snap()));
+    categoryRule(fixDockerNamedVolumes);
     applyBatch(fixDockerVolumeSelinuxLabel(logs, snap()));
     applyBatch(fixDockerBindMountAbsolutePath(logs, snap()));
-    applyBatch(fixDockerVolumeReadOnly(snap()));
+    categoryRule(fixDockerVolumeReadOnly);
     applyBatch(fixDockerTmpfsMount(logs, snap()));
     applyBatch(fixDockerNFSVolumeOptions(logs, snap()));
     applyBatch(fixDockerVolumeDriverConfig(logs, snap()));
-    applyBatch(fixDockerComposeInit(snap()));
+    categoryRule(fixDockerComposeInit);
     applyBatch(fixDockerVolumePermissions(logs, snap()));
   }
 
   if (hasCategory('missing_file')) {
-    applyBatch(fixCreateMinimalDockerfile(snap()));
+    categoryRule(fixCreateMinimalDockerfile);
     applyBatch(fixMissingTsConfig(logs, snap()));
     applyBatch(fixConfigMissingTsConfig(logs, snap()));
     applyBatch(fixMissingBuildScript(logs, snap()));
@@ -1006,7 +1147,7 @@ export function applyRuleBasedFixes(
   if (hasCategory('ssh_key_error')) {
     applyBatch(fixSSHKnownHosts(logs, snap()));
     applyBatch(fixAdvancedSSHKnownHosts(logs, snap()));
-    applyBatch(fixSSHDeployNonBlocking(snap()));
+    categoryRule(fixSSHDeployNonBlocking);
     applyBatch(fixSSHKeyFormatEd25519(logs, snap()));
     applyBatch(fixSSHAgentSocketForwarding(logs, snap()));
     applyBatch(fixSSHDeployKeyWriteAccess(logs, snap()));
@@ -1085,12 +1226,12 @@ export function applyRuleBasedFixes(
 
   if (hasCategory('missing_dependency')) {
     applyBatch(fixMissingPnpmSetup(logs, snap()));
-    applyBatch(fixMissingSetupPython(snap()));
-    applyBatch(fixMissingSetupJava(snap()));
-    applyBatch(fixMissingSetupGo(snap()));
-    applyBatch(fixMissingComposerInstall(snap()));
-    applyBatch(fixMissingPoetryInstall(snap()));
-    applyBatch(fixMissingPipenvInstall(snap()));
+    categoryRule(fixMissingSetupPython);
+    categoryRule(fixMissingSetupJava);
+    categoryRule(fixMissingSetupGo);
+    categoryRule(fixMissingComposerInstall);
+    categoryRule(fixMissingPoetryInstall);
+    categoryRule(fixMissingPipenvInstall);
     applyBatch(fixPeerDepConflict(logs, snap()));
     applyBatch(fixNpmOverrides(logs, snap()));
     applyBatch(fixYarnResolutions(logs, snap()));
@@ -1098,7 +1239,7 @@ export function applyRuleBasedFixes(
     applyBatch(fixPipDependencyConflict(logs, snap()));
     applyBatch(fixPipIgnoreRequiresPython(logs, snap()));
     applyBatch(fixMavenDependencyConflict(logs, snap()));
-    applyBatch(fixPipNoCacheDir(snap()));
+    categoryRule(fixPipNoCacheDir);
     applyBatch(fixPipUpgrade(logs, snap()));
     applyBatch(fixCorruptedLockfile(logs, snap()));
     applyBatch(fixYarnLockfileCorruption(logs, snap()));
@@ -1107,7 +1248,7 @@ export function applyRuleBasedFixes(
     applyBatch(fixPnpmLockfileCorruption(logs, snap()));
     applyBatch(fixMissingVirtualEnv(logs, snap()));
     applyBatch(fixPoetryVirtualEnv(logs, snap()));
-    applyBatch(fixCondaEnvironmentSetup(snap()));
+    categoryRule(fixCondaEnvironmentSetup);
     applyBatch(fixNodeVersionPin(logs, snap()));
     applyBatch(fixUnsupportedEngineVersion(logs, snap()));
     applyBatch(fixPythonVersionPin(logs, snap()));
@@ -1119,37 +1260,37 @@ export function applyRuleBasedFixes(
 
   if (hasCategory('python_deps')) {
     applyBatch(fixPipUpgrade(logs, snap()));
-    applyBatch(fixPipNoCacheDir(snap()));
+    categoryRule(fixPipNoCacheDir);
     applyBatch(fixPythonPath(logs, snap()));
-    applyBatch(fixCreateRequirementsTxt(snap()));
+    categoryRule(fixCreateRequirementsTxt);
   }
 
   if (hasCategory('env_missing')) {
     applyBatch(fixOptionalSecretSteps(logs, snap()));
     applyBatch(fixEnvVarWithDefault(logs, snap()));
     applyBatch(fixGitLabMissingVariables(logs, snap()));
-    applyBatch(fixCreateDotEnvExample(snap()));
-    applyBatch(fixMissingAwsRegion(snap()));
-    applyBatch(fixPythonEnvVars(snap()));
-    applyBatch(fixJavaEnvVars(snap()));
-    applyBatch(fixGoEnvVars(snap()));
-    applyBatch(fixCargoEnvVars(snap()));
-    applyBatch(fixUndeclaredEnvVarReference(snap()));
-    applyBatch(fixStepOutputScopeError(snap()));
-    applyBatch(fixMissingJobOutputsDeclaration(snap()));
-    applyBatch(fixEventInputScope(snap()));
+    categoryRule(fixCreateDotEnvExample);
+    categoryRule(fixMissingAwsRegion);
+    categoryRule(fixPythonEnvVars);
+    categoryRule(fixJavaEnvVars);
+    categoryRule(fixGoEnvVars);
+    categoryRule(fixCargoEnvVars);
+    categoryRule(fixUndeclaredEnvVarReference);
+    categoryRule(fixStepOutputScopeError);
+    categoryRule(fixMissingJobOutputsDeclaration);
+    categoryRule(fixEventInputScope);
   }
 
   if (hasCategory('build_failure')) {
     // Category 1: Build script failure
     applyBatch(fixMissingBuildScript(logs, snap()));
-    applyBatch(fixGradleWrapperPermission(snap()));
+    categoryRule(fixGradleWrapperPermission);
     applyBatch(fixGradleDaemonOOM(logs, snap()));
-    applyBatch(fixMavenBuildScript(snap()));
+    categoryRule(fixMavenBuildScript);
     applyBatch(fixTurboPipelineConfig(logs, snap()));
     applyBatch(fixNxBuildSetup(logs, snap()));
-    applyBatch(fixPnpmWorkspaceBuild(snap()));
-    applyBatch(fixCargoWorkspaceBuild(snap()));
+    categoryRule(fixPnpmWorkspaceBuild);
+    categoryRule(fixCargoWorkspaceBuild);
     applyBatch(fixAndroidGradleBuild(logs, snap()));
     applyBatch(fixShellScriptExitCodes(logs, snap()));
     // Category 2: Compilation failure
@@ -1170,11 +1311,11 @@ export function applyRuleBasedFixes(
     applyBatch(fixArtifactOutputPath(logs, snap()));
     applyBatch(fixGradleArtifactPath(logs, snap()));
     applyBatch(fixMavenArtifactPath(logs, snap()));
-    applyBatch(fixRustBinaryArtifact(snap()));
-    applyBatch(fixDotNetPublishArtifact(snap()));
-    applyBatch(fixGoArtifactPath(snap()));
-    applyBatch(fixNextExportArtifact(snap()));
-    applyBatch(fixDockerSaveArtifact(snap()));
+    categoryRule(fixRustBinaryArtifact);
+    categoryRule(fixDotNetPublishArtifact);
+    categoryRule(fixGoArtifactPath);
+    categoryRule(fixNextExportArtifact);
+    categoryRule(fixDockerSaveArtifact);
     // Category 4: Invalid build target
     applyBatch(fixInvalidBuildTarget(logs, snap()));
     applyBatch(fixGradleTaskNotFound(logs, snap()));
@@ -1184,40 +1325,40 @@ export function applyRuleBasedFixes(
     applyBatch(fixBazelBuildTarget(logs, snap()));
     // Category 5: Unsupported runtime version
     applyBatch(fixNodeExperimentalFlags(logs, snap()));
-    applyBatch(fixPython2to3(snap()));
+    categoryRule(fixPython2to3);
     applyBatch(fixJavaReleaseFlag(logs, snap()));
-    applyBatch(fixRustToolchainFile(snap()));
+    categoryRule(fixRustToolchainFile);
     applyBatch(fixDotNetTargetFramework(logs, snap()));
     applyBatch(fixGoModDirective(logs, snap()));
     applyBatch(fixSwiftToolsVersion(logs, snap()));
-    applyBatch(fixOpenSSLLegacyProvider(snap()));
+    categoryRule(fixOpenSSLLegacyProvider);
     applyBatch(fixRubyKeywordArgs(logs, snap()));
     applyBatch(fixPHPVersionCompat(logs, snap()));
     applyBatch(fixRubyNativeExtensions(logs, snap()));
     applyBatch(fixFlutterSDKConstraint(logs, snap()));
     // Extended Category 1
-    applyBatch(fixPrismaGenerate(snap()));
-    applyBatch(fixGoGenerateStep(snap()));
+    categoryRule(fixPrismaGenerate);
+    categoryRule(fixGoGenerateStep);
     applyBatch(fixLernaBootstrap(logs, snap()));
-    applyBatch(fixCMakeBuildSetup(snap()));
-    applyBatch(fixMakeParallelJobs(snap()));
-    applyBatch(fixProtobufGenerate(snap()));
-    applyBatch(fixDockerComposeBuildService(snap()));
+    categoryRule(fixCMakeBuildSetup);
+    categoryRule(fixMakeParallelJobs);
+    categoryRule(fixProtobufGenerate);
+    categoryRule(fixDockerComposeBuildService);
     // Extended Category 2
-    applyBatch(fixGraphQLCodegen(snap()));
-    applyBatch(fixTailwindContentPaths(snap()));
+    categoryRule(fixGraphQLCodegen);
+    categoryRule(fixTailwindContentPaths);
     applyBatch(fixAngularBuildBudget(logs, snap()));
-    applyBatch(fixSvelteKitAdapter(snap()));
+    categoryRule(fixSvelteKitAdapter);
     applyBatch(fixPostCSSConfig(logs, snap()));
-    applyBatch(fixNuxtNitroPreset(snap()));
+    categoryRule(fixNuxtNitroPreset);
     // Extended Category 3
-    applyBatch(fixLambdaZipPackage(snap()));
-    applyBatch(fixNuGetPackageOutput(snap()));
-    applyBatch(fixHelmChartPackage(snap()));
-    applyBatch(fixElectronArtifactPath(snap()));
-    applyBatch(fixPythonWheelBuild(snap()));
+    categoryRule(fixLambdaZipPackage);
+    categoryRule(fixNuGetPackageOutput);
+    categoryRule(fixHelmChartPackage);
+    categoryRule(fixElectronArtifactPath);
+    categoryRule(fixPythonWheelBuild);
     // Extended Category 4
-    applyBatch(fixRakeTask(snap()));
+    categoryRule(fixRakeTask);
     applyBatch(fixMixTask(logs, snap()));
     applyBatch(fixSbtBuildTask(logs, snap()));
     // Cross-category
@@ -1249,18 +1390,18 @@ export function applyRuleBasedFixes(
   if (hasCategory('artifact_missing')) {
     applyBatch(fixMissingOutputDirectory(logs, snap()));
     applyBatch(fixArtifactOutputPath(logs, snap()));
-    applyBatch(fixArtifactIfNoFilesError(snap()));
+    categoryRule(fixArtifactIfNoFilesError);
     applyBatch(fixGradleArtifactPath(logs, snap()));
     applyBatch(fixMavenArtifactPath(logs, snap()));
-    applyBatch(fixRustBinaryArtifact(snap()));
-    applyBatch(fixDotNetPublishArtifact(snap()));
-    applyBatch(fixGoArtifactPath(snap()));
-    applyBatch(fixNextExportArtifact(snap()));
-    applyBatch(fixDockerSaveArtifact(snap()));
+    categoryRule(fixRustBinaryArtifact);
+    categoryRule(fixDotNetPublishArtifact);
+    categoryRule(fixGoArtifactPath);
+    categoryRule(fixNextExportArtifact);
+    categoryRule(fixDockerSaveArtifact);
   }
 
   if (hasCategory('gradle_build_failure')) {
-    applyBatch(fixGradleWrapperPermission(snap()));
+    categoryRule(fixGradleWrapperPermission);
     applyBatch(fixGradleDaemonOOM(logs, snap()));
     applyBatch(fixGradleTaskNotFound(logs, snap()));
     applyBatch(fixGradleArtifactPath(logs, snap()));
@@ -1270,19 +1411,19 @@ export function applyRuleBasedFixes(
   }
 
   if (hasCategory('maven_build_failure')) {
-    applyBatch(fixMavenBuildScript(snap()));
+    categoryRule(fixMavenBuildScript);
     applyBatch(fixMavenGoalNotFound(logs, snap()));
     applyBatch(fixMavenArtifactPath(logs, snap()));
     applyBatch(fixJavaCompilationError(logs, snap()));
     applyBatch(fixJavaReleaseFlag(logs, snap()));
-    applyBatch(fixDotnetRestore(snap()));
+    categoryRule(fixDotnetRestore);
   }
 
   if (hasCategory('runtime_version_error')) {
     applyBatch(fixNodeExperimentalFlags(logs, snap()));
-    applyBatch(fixPython2to3(snap()));
+    categoryRule(fixPython2to3);
     applyBatch(fixJavaReleaseFlag(logs, snap()));
-    applyBatch(fixRustToolchainFile(snap()));
+    categoryRule(fixRustToolchainFile);
     applyBatch(fixDotNetTargetFramework(logs, snap()));
     applyBatch(fixGoModDirective(logs, snap()));
     applyBatch(fixSwiftToolsVersion(logs, snap()));
@@ -1386,7 +1527,7 @@ export function applyRuleBasedFixes(
   }
 
   if (hasCategory('test_failure')) {
-    applyBatch(fixJestCIFlag(snap()));
+    categoryRule(fixJestCIFlag);
     // Unit test failures
     applyBatch(fixUnitTestFailure(logs, snap()));
     applyBatch(fixJestRunInBand(logs, snap()));
@@ -1455,7 +1596,7 @@ export function applyRuleBasedFixes(
   }
 
   if (hasCategory('snapshot_mismatch')) {
-    applyBatch(fixJestCIFlag(snap()));
+    categoryRule(fixJestCIFlag);
     applyBatch(fixStaleMocks(logs, snap()));
     applyBatch(fixJestUpdateSnapshot(logs, snap()));
     applyBatch(fixSnapshotSerializer(logs, snap()));
@@ -1487,51 +1628,51 @@ export function applyRuleBasedFixes(
   if (hasCategory('job_timeout')) {
     applyBatch(fixJobTimeout(logs, snap()));
     applyBatch(fixConfigJobTimeout(logs, snap()));
-    applyBatch(fixParallelJobTimeouts(snap()));
+    categoryRule(fixParallelJobTimeouts);
     applyBatch(fixStepLevelTimeout(logs, snap()));
     applyBatch(fixGitLabJobTimeout(logs, snap()));
     applyBatch(fixHangingProcessWatchdog(logs, snap()));
   }
 
   if (hasCategory('concurrency_issue')) {
-    applyBatch(fixMissingConcurrencyGroup(snap()));
-    applyBatch(fixConcurrencyForPR(snap()));
-    applyBatch(fixBarrierGateJob(snap()));
-    applyBatch(fixMatrixFanInSummary(snap()));
+    categoryRule(fixMissingConcurrencyGroup);
+    categoryRule(fixConcurrencyForPR);
+    categoryRule(fixBarrierGateJob);
+    categoryRule(fixMatrixFanInSummary);
   }
 
   if (hasCategory('pipeline_stage_failure')) {
     applyBatch(fixShellStrictMode(logs, snap()));
     applyBatch(fixPipelineStageFailureDiagnostic(logs, snap()));
     applyBatch(fixFlakyStageContinueOnError(logs, snap()));
-    applyBatch(fixGitLabIncrementalPipeline(snap()));
-    applyBatch(fixWorkflowRunWait(snap()));
-    applyBatch(fixPipelineFailureNotification(snap()));
+    categoryRule(fixGitLabIncrementalPipeline);
+    categoryRule(fixWorkflowRunWait);
+    categoryRule(fixPipelineFailureNotification);
     applyBatch(fixMatrixIncludeExclude(logs, snap()));
     applyBatch(fixFailedPipelineStageRetry(logs, snap()));
   }
 
   if (hasCategory('stage_order_error')) {
-    applyBatch(fixGitLabStageOrder(snap()));
-    applyBatch(fixGitLabStageOrdering(snap()));
-    applyBatch(fixGitLabDAGPipeline(snap()));
+    categoryRule(fixGitLabStageOrder);
+    categoryRule(fixGitLabStageOrdering);
+    categoryRule(fixGitLabDAGPipeline);
     applyBatch(fixDanglingNeedsReference(logs, snap()));
-    applyBatch(fixJobOrderingWithNeeds(snap()));
-    applyBatch(fixMissingJobNeeds(snap()));
+    categoryRule(fixJobOrderingWithNeeds);
+    categoryRule(fixMissingJobNeeds);
   }
 
   if (hasCategory('invalid_trigger')) {
-    applyBatch(fixPushBranchFilter(snap()));
-    applyBatch(fixWorkflowDispatchInputs(snap()));
-    applyBatch(fixPullRequestTargetSecurity(snap()));
+    categoryRule(fixPushBranchFilter);
+    categoryRule(fixWorkflowDispatchInputs);
+    categoryRule(fixPullRequestTargetSecurity);
     applyBatch(fixCronScheduleExpression(logs, snap()));
-    applyBatch(fixWorkflowCallContract(snap()));
-    applyBatch(fixPushTagsPattern(snap()));
-    applyBatch(fixPathFilterTrigger(snap()));
+    categoryRule(fixWorkflowCallContract);
+    categoryRule(fixPushTagsPattern);
+    categoryRule(fixPathFilterTrigger);
   }
 
   if (hasCategory('runner_unavailable')) {
-    applyBatch(fixParallelJobTimeouts(snap()));
+    categoryRule(fixParallelJobTimeouts);
     applyBatch(fixMissingRunner(logs, snap()));
     applyBatch(fixCircularDependency(logs, snap()));
     applyBatch(fixRunnerGroupFallback(logs, snap()));
@@ -1542,39 +1683,39 @@ export function applyRuleBasedFixes(
 
   if (hasCategory('artifact_upload_failure')) {
     applyBatch(fixArtifactUploadGlob(logs, snap()));
-    applyBatch(fixArtifactIfNoFilesFound(snap()));
+    categoryRule(fixArtifactIfNoFilesFound);
     applyBatch(fixMultipleArtifactUploads(logs, snap()));
-    applyBatch(fixGitLabArtifactConfig(snap()));
+    categoryRule(fixGitLabArtifactConfig);
     applyBatch(fixArtifactCompression(logs, snap()));
     applyBatch(fixS3ArtifactFallback(logs, snap()));
-    applyBatch(fixArtifactRetentionDays(snap()));
+    categoryRule(fixArtifactRetentionDays);
     applyBatch(fixArtifactNameMismatch(logs, snap()));
   }
 
   if (hasCategory('cache_restore_failure')) {
-    applyBatch(fixCacheRestoreKeys(snap()));
+    categoryRule(fixCacheRestoreKeys);
     applyBatch(fixCachePathMismatch(logs, snap()));
-    applyBatch(fixSetupActionBuiltinCache(snap()));
-    applyBatch(fixGitLabCachePolicy(snap()));
-    applyBatch(fixCacheKeyHashFiles(snap()));
+    categoryRule(fixSetupActionBuiltinCache);
+    categoryRule(fixGitLabCachePolicy);
+    categoryRule(fixCacheKeyHashFiles);
     applyBatch(fixCacheBust(logs, snap()));
-    applyBatch(fixCacheKeyOverSpecific(snap()));
-    applyBatch(fixGitLabMissingCache(snap()));
+    categoryRule(fixCacheKeyOverSpecific);
+    categoryRule(fixGitLabMissingCache);
   }
 
   if (hasCategory('parallel_sync_issue')) {
-    applyBatch(fixBarrierGateJob(snap()));
-    applyBatch(fixDownloadAfterUpload(snap()));
-    applyBatch(fixParallelJobOutputPaths(snap()));
-    applyBatch(fixMatrixArtifactFanIn(snap()));
-    applyBatch(fixConcurrencyForPR(snap()));
-    applyBatch(fixMatrixFanInSummary(snap()));
-    applyBatch(fixWorkflowLevelEnvSharing(snap()));
-    applyBatch(fixFailFastMatrix(snap()));
+    categoryRule(fixBarrierGateJob);
+    categoryRule(fixDownloadAfterUpload);
+    categoryRule(fixParallelJobOutputPaths);
+    categoryRule(fixMatrixArtifactFanIn);
+    categoryRule(fixConcurrencyForPR);
+    categoryRule(fixMatrixFanInSummary);
+    categoryRule(fixWorkflowLevelEnvSharing);
+    categoryRule(fixFailFastMatrix);
   }
 
   if (hasCategory('git_merge_conflict')) {
-    applyBatch(fixMergeConflictMarkers(snap()));
+    categoryRule(fixMergeConflictMarkers);
     applyBatch(fixMergeUnrelatedHistories(logs, snap()));
     applyBatch(fixGitRebasePullStrategy(logs, snap()));
     applyBatch(fixBinaryMergeDriver(logs, snap()));
@@ -1582,7 +1723,7 @@ export function applyRuleBasedFixes(
     applyBatch(fixCherryPickAbort(logs, snap()));
     applyBatch(fixGitMergeStrategyFlag(logs, snap()));
     applyBatch(fixDivergentBranchConfig(logs, snap()));
-    applyBatch(fixRebaseBeforeMerge(snap()));
+    categoryRule(fixRebaseBeforeMerge);
   }
 
   if (hasCategory('git_detached_head')) {
@@ -1606,7 +1747,7 @@ export function applyRuleBasedFixes(
     applyBatch(fixSSHAgentForPush(logs, snap()));
     applyBatch(fixGitPushFollowTags(logs, snap()));
     applyBatch(fixGitPushAtomic(logs, snap()));
-    applyBatch(fixGitHubPagesDeploy(snap()));
+    categoryRule(fixGitHubPagesDeploy);
     applyBatch(fixLargeFilePush(logs, snap()));
     applyBatch(fixGitMirrorPush(logs, snap()));
   }
@@ -1617,7 +1758,7 @@ export function applyRuleBasedFixes(
     applyBatch(fixSignedCommitSetup(logs, snap()));
     applyBatch(fixDisableSigningInCI(logs, snap()));
     applyBatch(fixProtectedBranchPAT(logs, snap()));
-    applyBatch(fixRecursivePipelineTrigger(snap()));
+    categoryRule(fixRecursivePipelineTrigger);
     applyBatch(fixPreReceiveSecretHook(logs, snap()));
     applyBatch(fixGitHubAppTokenGen(logs, snap()));
   }
@@ -1659,7 +1800,7 @@ export function applyRuleBasedFixes(
     applyBatch(fixMissingUpstreamBranch(logs, snap()));
     applyBatch(fixStaleRemoteTracking(logs, snap()));
     applyBatch(fixBranchNameSanitize(logs, snap()));
-    applyBatch(fixGitLabDefaultBranch(snap()));
+    categoryRule(fixGitLabDefaultBranch);
     applyBatch(fixShallowClone(logs, snap()));
   }
 
@@ -1670,20 +1811,20 @@ export function applyRuleBasedFixes(
   }
 
   if (hasCategory('cache_failure')) {
-    applyBatch(fixCacheKeyOverSpecific(snap()));
-    applyBatch(fixNpmCacheRestoreKeys(snap()));
+    categoryRule(fixCacheKeyOverSpecific);
+    categoryRule(fixNpmCacheRestoreKeys);
   }
 
   if (hasCategory('runner_unavailable')) {
-    applyBatch(fixParallelJobTimeouts(snap()));
+    categoryRule(fixParallelJobTimeouts);
     applyBatch(fixMissingRunner(logs, snap()));
     applyBatch(fixCircularDependency(logs, snap()));
   }
 
   if (hasCategory('deploy_failure')) {
-    applyBatch(fixDeployRollbackOnFailure(snap()));
-    applyBatch(fixSSHDeployNonBlocking(snap()));
-    applyBatch(fixK8sRolloutWait(snap()));
+    categoryRule(fixDeployRollbackOnFailure);
+    categoryRule(fixSSHDeployNonBlocking);
+    categoryRule(fixK8sRolloutWait);
     applyBatch(fixBlueGreenHealthCheck(logs, snap()));
     applyBatch(fixServiceUnavailable(logs, snap()));
     applyBatch(fixLoadBalancerRouting(logs, snap()));
@@ -1691,8 +1832,8 @@ export function applyRuleBasedFixes(
     applyBatch(fixCanaryDeployment(logs, snap()));
     // Extended rollback
     applyBatch(fixHelmRollbackOnFailure(logs, snap()));
-    applyBatch(fixKubectlRollbackAnnotation(snap()));
-    applyBatch(fixK8sRollbackHistoryLimit(snap()));
+    categoryRule(fixKubectlRollbackAnnotation);
+    categoryRule(fixK8sRollbackHistoryLimit);
     applyBatch(fixHerokuReleaseRollback(logs, snap()));
     applyBatch(fixECSRollbackTaskDef(logs, snap()));
     applyBatch(fixCloudRunRollbackRevision(logs, snap()));
@@ -1701,40 +1842,40 @@ export function applyRuleBasedFixes(
     applyBatch(fixGitLabDeployRollback(logs, snap()));
     applyBatch(fixDeployRollbackNotification(logs, snap()));
     // Production deploy gates
-    applyBatch(fixConcurrentDeployPrevention(snap()));
-    applyBatch(fixProdDeployBranchGuard(snap()));
+    categoryRule(fixConcurrentDeployPrevention);
+    categoryRule(fixProdDeployBranchGuard);
     applyBatch(fixDeployTimeoutExtension(logs, snap()));
     applyBatch(fixPreDeploySmoke(logs, snap()));
   }
 
   if (hasCategory('rollback_failure')) {
-    applyBatch(fixDeployRollbackOnFailure(snap()));
+    categoryRule(fixDeployRollbackOnFailure);
     applyBatch(fixHelmRollbackOnFailure(logs, snap()));
-    applyBatch(fixKubectlRollbackAnnotation(snap()));
-    applyBatch(fixK8sRollbackHistoryLimit(snap()));
+    categoryRule(fixKubectlRollbackAnnotation);
+    categoryRule(fixK8sRollbackHistoryLimit);
     applyBatch(fixHerokuReleaseRollback(logs, snap()));
     applyBatch(fixECSRollbackTaskDef(logs, snap()));
     applyBatch(fixCloudRunRollbackRevision(logs, snap()));
     applyBatch(fixAzureSlotRollback(logs, snap()));
     applyBatch(fixFlyioRollback(logs, snap()));
-    applyBatch(fixArgoRollbackSyncWave(snap()));
+    categoryRule(fixArgoRollbackSyncWave);
     applyBatch(fixTerraformDestroyGuard(logs, snap()));
     applyBatch(fixGitLabDeployRollback(logs, snap()));
     applyBatch(fixDeployRollbackNotification(logs, snap()));
   }
 
   if (hasCategory('failed_production_deploy')) {
-    applyBatch(fixProdDeployGatingJob(snap()));
-    applyBatch(fixConcurrentDeployPrevention(snap()));
+    categoryRule(fixProdDeployGatingJob);
+    categoryRule(fixConcurrentDeployPrevention);
     applyBatch(fixPreDeploySmoke(logs, snap()));
     applyBatch(fixDeployEnvValidation(logs, snap()));
     applyBatch(fixTerraformPlanBeforeApply(logs, snap()));
     applyBatch(fixHelmDryRunFirst(logs, snap()));
-    applyBatch(fixK8sApplyValidation(logs, snap()));
+    if (hardening) applyBatch(fixK8sApplyValidation(logs, snap())); // validation step, not a repair
     applyBatch(fixDeployTimeoutExtension(logs, snap()));
-    applyBatch(fixDockerImageHealthProbe(snap()));
-    applyBatch(fixProdDeployBranchGuard(snap()));
-    applyBatch(fixDeployTaggedRelease(snap()));
+    categoryRule(fixDockerImageHealthProbe);
+    categoryRule(fixProdDeployBranchGuard);
+    categoryRule(fixDeployTaggedRelease);
   }
 
   if (hasCategory('blue_green_conflict')) {
@@ -1754,7 +1895,7 @@ export function applyRuleBasedFixes(
   if (hasCategory('canary_mismatch')) {
     applyBatch(fixCanaryDeployment(logs, snap()));
     applyBatch(fixCanaryIngressAnnotation(logs, snap()));
-    applyBatch(fixCanaryK8sReplicaCount(snap()));
+    categoryRule(fixCanaryK8sReplicaCount);
     applyBatch(fixCanaryMetricAnalysis(logs, snap()));
     applyBatch(fixCanaryRollbackThreshold(logs, snap()));
     applyBatch(fixCanaryCloudRunRevision(logs, snap()));
@@ -1775,7 +1916,7 @@ export function applyRuleBasedFixes(
     applyBatch(fixLivenessReadinessProbes(logs, snap()));
     applyBatch(fixStartupProbeTimeout(logs, snap()));
     applyBatch(fixHealthCheckResponseCode(logs, snap()));
-    applyBatch(fixDockerStartupHealthcheck(snap()));
+    categoryRule(fixDockerStartupHealthcheck);
   }
 
   if (hasCategory('load_balancer_issue')) {
@@ -1837,53 +1978,53 @@ export function applyRuleBasedFixes(
   }
 
   if (hasCategory('yaml_syntax')) {
-    applyBatch(fixYamlTabIndentation(snap()));
-    applyBatch(fixDuplicateYamlKey(snap()));
+    categoryRule(fixYamlTabIndentation);
+    categoryRule(fixDuplicateYamlKey);
     applyBatch(fixMissingYamlColon(logs, snap()));
-    applyBatch(fixStepUsesAndRun(snap()));
-    applyBatch(fixMissingWorkflowTrigger(snap()));
-    applyBatch(fixWorkflowTriggerTypo(snap()));
-    applyBatch(fixIncorrectConfigHierarchy(snap()));
+    categoryRule(fixStepUsesAndRun);
+    categoryRule(fixMissingWorkflowTrigger);
+    categoryRule(fixWorkflowTriggerTypo);
+    categoryRule(fixIncorrectConfigHierarchy);
     applyBatch(fixUnsupportedConfigParameter(logs, snap()));
     applyBatch(fixGitLabYamlAnchors(logs, snap()));
-    applyBatch(fixDuplicateGitLabStage(snap()));
+    categoryRule(fixDuplicateGitLabStage);
     applyBatch(fixDuplicateJobId(logs, snap()));
-    applyBatch(fixDuplicateEnvKey(snap()));
+    categoryRule(fixDuplicateEnvKey);
   }
 
   if (hasCategory('invalid_gitlab_ci')) {
     applyBatch(fixGitLabYamlAnchors(logs, snap()));
     applyBatch(fixGitLabJobMissingImage(logs, snap()));
     applyBatch(fixGitLabExtendsMissing(logs, snap()));
-    applyBatch(fixGitLabRulesNeverMatch(snap()));
-    applyBatch(fixGitLabWorkflowRules(snap()));
+    categoryRule(fixGitLabRulesNeverMatch);
+    categoryRule(fixGitLabWorkflowRules);
     applyBatch(fixGitLabTriggerConfig(logs, snap()));
     applyBatch(fixGitLabParallelMatrix(logs, snap()));
     applyBatch(fixGitLabServicesConfig(logs, snap()));
-    applyBatch(fixGitLabEnvironmentConfig(snap()));
-    applyBatch(fixGitLabResourceGroup(snap()));
-    applyBatch(fixGitLabStageOrder(snap()));
-    applyBatch(fixGitLabStageOrdering(snap()));
-    applyBatch(fixDuplicateGitLabStage(snap()));
+    categoryRule(fixGitLabEnvironmentConfig);
+    categoryRule(fixGitLabResourceGroup);
+    categoryRule(fixGitLabStageOrder);
+    categoryRule(fixGitLabStageOrdering);
+    categoryRule(fixDuplicateGitLabStage);
     applyBatch(fixGitLabBeforeScriptLevel(logs, snap()));
     applyBatch(fixGitLabCECompatibility(logs, snap()));
-    applyBatch(fixGitLabVariableScope(snap()));
-    applyBatch(fixGitLabIncludePath(snap()));
+    categoryRule(fixGitLabVariableScope);
+    categoryRule(fixGitLabIncludePath);
   }
 
   if (hasCategory('invalid_workflow_syntax')) {
     applyBatch(fixInvalidJobId(logs, snap()));
     applyBatch(fixWorkflowExpressionSyntax(logs, snap()));
-    applyBatch(fixWorkflowIfCondition(snap()));
+    categoryRule(fixWorkflowIfCondition);
     applyBatch(fixMissingStepsKey(logs, snap()));
-    applyBatch(fixReusableWorkflowPin(snap()));
-    applyBatch(fixMissingWorkflowName(snap()));
+    categoryRule(fixReusableWorkflowPin);
+    categoryRule(fixMissingWorkflowName);
     applyBatch(fixActionInputTypeMismatch(logs, snap()));
-    applyBatch(fixIfAlwaysSyntax(snap()));
-    applyBatch(fixStepUsesAndRunConflict(snap()));
+    categoryRule(fixIfAlwaysSyntax);
+    categoryRule(fixStepUsesAndRunConflict);
     applyBatch(fixDuplicateJobId(logs, snap()));
-    applyBatch(fixDuplicatePermissions(snap()));
-    applyBatch(fixIncorrectConfigHierarchy(snap()));
+    categoryRule(fixDuplicatePermissions);
+    categoryRule(fixIncorrectConfigHierarchy);
   }
 
   if (hasCategory('missing_config_file')) {
@@ -1894,55 +2035,55 @@ export function applyRuleBasedFixes(
     applyBatch(fixTestingMissingVitestConfig(logs, snap()));
     applyBatch(fixMissingNvmrc(logs, snap()));
     applyBatch(fixMissingPyprojectToml(logs, snap()));
-    applyBatch(fixMissingDockerignore(snap()));
-    applyBatch(fixDockerMissingDockerignore(snap()));
+    categoryRule(fixMissingDockerignore);
+    categoryRule(fixDockerMissingDockerignore);
     applyBatch(fixMissingGitignore(logs, snap()));
     applyBatch(fixMissingPostcssConfig(logs, snap()));
     applyBatch(fixMissingBabelConfig(logs, snap()));
     applyBatch(fixMissingEslintConfig(logs, snap()));
     applyBatch(fixMissingJestConfig(logs, snap()));
     applyBatch(fixMissingPrettierConfig(logs, snap()));
-    applyBatch(fixGitLabIncludePath(snap()));
+    categoryRule(fixGitLabIncludePath);
   }
 
   if (hasCategory('config_hierarchy_error')) {
-    applyBatch(fixIncorrectConfigHierarchy(snap()));
+    categoryRule(fixIncorrectConfigHierarchy);
     applyBatch(fixTsConfigExtendsChain(logs, snap()));
     applyBatch(fixGitLabBeforeScriptLevel(logs, snap()));
     applyBatch(fixPackageJsonWorkspacesLevel(logs, snap()));
-    applyBatch(fixStepUsesAndRunConflict(snap()));
+    categoryRule(fixStepUsesAndRunConflict);
   }
 
   if (hasCategory('unsupported_config_param')) {
     applyBatch(fixUnsupportedConfigParameter(logs, snap()));
     applyBatch(fixDeprecatedTsConfigOptions(logs, snap()));
-    applyBatch(fixDockerComposeVersionField(snap()));
-    applyBatch(fixIfAlwaysSyntax(snap()));
+    categoryRule(fixDockerComposeVersionField);
+    categoryRule(fixIfAlwaysSyntax);
     applyBatch(fixGitLabCECompatibility(logs, snap()));
     applyBatch(fixNpmEnginesRange(logs, snap()));
   }
 
   if (hasCategory('duplicate_config_key')) {
     applyBatch(fixDuplicateJobId(logs, snap()));
-    applyBatch(fixDuplicateGitLabStage(snap()));
-    applyBatch(fixDuplicateEnvKey(snap()));
-    applyBatch(fixDuplicateDockerPort(snap()));
-    applyBatch(fixDuplicatePermissions(snap()));
-    applyBatch(fixDuplicatePackageScript(snap()));
-    applyBatch(fixDuplicateYamlKey(snap()));
+    categoryRule(fixDuplicateGitLabStage);
+    categoryRule(fixDuplicateEnvKey);
+    categoryRule(fixDuplicateDockerPort);
+    categoryRule(fixDuplicatePermissions);
+    categoryRule(fixDuplicatePackageScript);
+    categoryRule(fixDuplicateYamlKey);
   }
 
   if (hasCategory('env_mapping_error')) {
-    applyBatch(fixEnvContextScope(snap()));
-    applyBatch(fixGitLabVariableScope(snap()));
-    applyBatch(fixSecretToEnvMapping(snap()));
-    applyBatch(fixInputToEnvMapping(snap()));
-    applyBatch(fixJobOutputDeclaration(snap()));
+    categoryRule(fixEnvContextScope);
+    categoryRule(fixGitLabVariableScope);
+    categoryRule(fixSecretToEnvMapping);
+    categoryRule(fixInputToEnvMapping);
+    categoryRule(fixJobOutputDeclaration);
     applyBatch(fixTerraformVarEnv(logs, snap()));
     applyBatch(fixDotenvLoadOrder(logs, snap()));
     applyBatch(fixDockerComposeEnvFile(logs, snap()));
     applyBatch(fixK8sSecretEnvMapping(logs, snap()));
-    applyBatch(fixMissingSecretsContext(snap()));
+    categoryRule(fixMissingSecretsContext);
     applyBatch(fixMissingAwsRegionMapping(logs, snap()));
   }
 
@@ -2091,12 +2232,12 @@ export function applyRuleBasedFixes(
 
   if (hasCategory('lockfile_corrupt')) {
     applyBatch(fixCorruptedLockfile(logs, snap()));
-    applyBatch(fixNpmCiToInstall(snap()));
+    categoryRule(fixNpmCiToInstall);
   }
 
   if (hasCategory('venv_missing')) {
     applyBatch(fixMissingVirtualEnv(logs, snap()));
-    applyBatch(fixPipNoCacheDir(snap()));
+    categoryRule(fixPipNoCacheDir);
     applyBatch(fixPipUpgrade(logs, snap()));
     applyBatch(fixPythonPath(logs, snap()));
   }
@@ -2115,15 +2256,15 @@ export function applyRuleBasedFixes(
     applyBatch(fixDockerRandomPortAssignment(logs, snap()));
     applyBatch(fixDockerNetworkSubnetConflict(logs, snap()));
     applyBatch(fixDockerIPv6BindingConflict(logs, snap()));
-    applyBatch(fixDockerComposePortFormat(snap()));
-    applyBatch(fixDockerServiceContainerPorts(snap()));
+    categoryRule(fixDockerComposePortFormat);
+    categoryRule(fixDockerServiceContainerPorts);
   }
 
   if (hasCategory('image_pull_failure')) {
     applyBatch(fixDockerImagePullFailure(logs, snap()));
     applyBatch(fixDockerHubRateLimit(logs, snap()));
-    applyBatch(fixDockerBaseImagePin(snap()));
-    applyBatch(fixDockerImageDigestPin(snap()));
+    categoryRule(fixDockerBaseImagePin);
+    categoryRule(fixDockerImageDigestPin);
     applyBatch(fixDockerRegistryPathFormat(logs, snap()));
     applyBatch(fixDockerTagFallback(logs, snap()));
     applyBatch(fixDockerComposePrivateImageAuth(logs, snap()));
@@ -2135,12 +2276,12 @@ export function applyRuleBasedFixes(
     applyBatch(fixServiceUnavailable(logs, snap()));
     applyBatch(fixConnectionDraining(logs, snap()));
     applyBatch(fixServiceStartupProbe(logs, snap()));
-    applyBatch(fixServicePodDisruptionBudget(snap()));
-    applyBatch(fixServiceHPAMinReplicas(snap()));
+    categoryRule(fixServicePodDisruptionBudget);
+    categoryRule(fixServiceHPAMinReplicas);
     applyBatch(fixServiceGracefulShutdown(logs, snap()));
-    applyBatch(fixServiceTopologySpread(snap()));
+    categoryRule(fixServiceTopologySpread);
     applyBatch(fixServiceCircuitBreaker(logs, snap()));
-    applyBatch(fixServiceReadinessGate(snap()));
+    categoryRule(fixServiceReadinessGate);
     applyBatch(fixServiceResourceQuota(logs, snap()));
   }
 
@@ -2160,7 +2301,7 @@ export function applyRuleBasedFixes(
 
   if (hasCategory('third_party_failure')) {
     applyBatch(fixBrokenThirdPartyIntegration(logs, snap()));
-    applyBatch(fixSlackNotificationSecret(snap()));
+    categoryRule(fixSlackNotificationSecret);
     applyBatch(fixSentryDSNEnvVar(logs, snap()));
     applyBatch(fixDatadogAgentConfig(logs, snap()));
     applyBatch(fixSonarCloudQualityGate(logs, snap()));
@@ -2197,13 +2338,13 @@ export function applyRuleBasedFixes(
   }
 
   if (hasCategory('rest_endpoint_mismatch')) {
-    applyBatch(fixRESTBaseURLEnvVar(snap()));
+    categoryRule(fixRESTBaseURLEnvVar);
     applyBatch(fixRESTVersionPrefix(logs, snap()));
     applyBatch(fixRESTMethodMismatch(logs, snap()));
     applyBatch(fixRESTTrailingSlash(logs, snap()));
     applyBatch(fixRESTAuthHeader(logs, snap()));
     applyBatch(fixRESTContentTypeHeader(logs, snap()));
-    applyBatch(fixRESTEndpointEnvMatrix(snap()));
+    categoryRule(fixRESTEndpointEnvMatrix);
     applyBatch(fixRESTIdempotencyHeader(logs, snap()));
     applyBatch(fixRESTResponseTimeLogging(logs, snap()));
   }
@@ -2211,26 +2352,26 @@ export function applyRuleBasedFixes(
   // ── NEW categories ────────────────────────────────────────────────────────
 
   if (hasCategory('husky_hook_failure')) {
-    applyBatch(fixHuskyCI(snap()));
-    applyBatch(fixHuskyPreCommitCI(snap()));
+    categoryRule(fixHuskyCI);
+    categoryRule(fixHuskyPreCommitCI);
   }
 
   if (hasCategory('go_build_failure')) {
-    applyBatch(fixGoModDownload(snap()));
+    categoryRule(fixGoModDownload);
     applyBatch(fixGitConfigSafeDirectory(logs, snap()));
   }
 
   if (hasCategory('rust_build_failure')) {
-    applyBatch(fixRustCargoCache(snap()));
+    categoryRule(fixRustCargoCache);
     applyBatch(fixRustCompilationError(logs, snap()));
-    applyBatch(fixRustToolchainFile(snap()));
-    applyBatch(fixCargoWorkspaceBuild(snap()));
-    applyBatch(fixRustBinaryArtifact(snap()));
+    categoryRule(fixRustToolchainFile);
+    categoryRule(fixCargoWorkspaceBuild);
+    categoryRule(fixRustBinaryArtifact);
   }
 
   if (hasCategory('e2e_failure')) {
-    applyBatch(fixPlaywrightBrowserInstall(snap()));
-    applyBatch(fixCypressCIDependencies(snap()));
+    categoryRule(fixPlaywrightBrowserInstall);
+    categoryRule(fixCypressCIDependencies);
     applyBatch(fixTestEnvironmentMisconfig(logs, snap()));
     applyBatch(fixIntegrationTestFailure(logs, snap()));
   }
@@ -2265,23 +2406,23 @@ export function applyRuleBasedFixes(
   }
 
   if (hasCategory('terraform_failure')) {
-    applyBatch(fixTerraformEnvVars(snap()));
+    categoryRule(fixTerraformEnvVars);
     applyBatch(fixMissingPermissions(logs, snap()));
   }
 
   if (hasCategory('matrix_failure')) {
-    applyBatch(fixFailFastMatrix(snap()));
-    applyBatch(fixParallelJobTimeouts(snap()));
+    categoryRule(fixFailFastMatrix);
+    categoryRule(fixParallelJobTimeouts);
     applyBatch(fixMissingRunner(logs, snap()));
   }
 
   if (hasCategory('artifact_retention')) {
-    applyBatch(fixArtifactRetentionDays(snap()));
+    categoryRule(fixArtifactRetentionDays);
     applyBatch(fixArtifactNameMismatch(logs, snap()));
   }
 
   if (hasCategory('vite_build_failure')) {
-    applyBatch(fixViteProductionBuild(snap()));
+    categoryRule(fixViteProductionBuild);
     applyBatch(fixNodeHeapMemory(logs, snap()));
     applyBatch(fixESBuildPathResolution(logs, snap()));
     applyBatch(fixESMCJSConflict(logs, snap()));
@@ -2298,10 +2439,10 @@ export function applyRuleBasedFixes(
   }
 
   if (hasCategory('dotnet_build_failure')) {
-    applyBatch(fixDotnetRestore(snap()));
+    categoryRule(fixDotnetRestore);
     applyBatch(fixDotNetCompilationError(logs, snap()));
     applyBatch(fixDotNetTargetFramework(logs, snap()));
-    applyBatch(fixDotNetPublishArtifact(snap()));
+    categoryRule(fixDotNetPublishArtifact);
   }
 
   // ════════════════════════════════════════════════════════════════════════
@@ -2335,11 +2476,11 @@ export function applyRuleBasedFixes(
   applyBatch(fixDeprecatedNpmDependency(logs, snap()));
   applyBatch(fixCompilationFailure(logs, snap()));
   applyBatch(fixInvalidBuildTarget(logs, snap()));
-  applyBatch(fixDockerBuildArgEnvVars(snap()));
-  applyBatch(fixGoModDownload(snap()));
-  applyBatch(fixRustCargoCache(snap()));
+  staticRule(fixDockerBuildArgEnvVars);
+  staticRule(fixGoModDownload);
+  staticRule(fixRustCargoCache);
   applyBatch(fixESBuildPathResolution(logs, snap()));
-  applyBatch(fixMakefileCIMode(snap()));
+  staticRule(fixMakefileCIMode);
 
   // Intermediate cross-category
   applyBatch(fixShallowCloneFetchDepth(logs, snap()));
@@ -2355,7 +2496,7 @@ export function applyRuleBasedFixes(
   applyBatch(fixAdvancedOidc(logs, snap()));
   applyBatch(fixJobTimeout(logs, snap()));
   applyBatch(fixConfigJobTimeout(logs, snap()));
-  applyBatch(fixMissingConcurrencyGroup(snap()));
+  staticRule(fixMissingConcurrencyGroup);
   applyBatch(fixNullReferenceException(logs, ciSnap()));
   applyBatch(fixTypeMismatch(logs, snap()));
   applyBatch(fixNodeHeapOOM(logs, snap()));
@@ -2452,27 +2593,27 @@ export function applyRuleBasedFixes(
   applyBatch(fixPackageRegistryAuth(logs, snap()));
   applyBatch(fixGitLabCrossProjectToken(logs, snap()));
   applyBatch(fixAdvancedGitLabCrossProjectToken(logs, snap()));
-  applyBatch(fixPlaywrightBrowserInstall(snap()));
-  applyBatch(fixCypressCIDependencies(snap()));
+  staticRule(fixPlaywrightBrowserInstall);
+  staticRule(fixCypressCIDependencies);
   applyBatch(fixMissingPrettierConfig(logs, snap()));
   applyBatch(fixESLintFlatConfig(logs, snap()));
   applyBatch(fixWebpackMemoryLimit(logs, snap()));
-  applyBatch(fixDotnetRestore(snap()));
-  applyBatch(fixViteProductionBuild(snap()));
-  applyBatch(fixRubyBundlerSetup(snap()));
+  staticRule(fixDotnetRestore);
+  staticRule(fixViteProductionBuild);
+  staticRule(fixRubyBundlerSetup);
   applyBatch(fixAddDebugFlags(logs, snap()));
   // Pipeline cross-category
   applyBatch(fixShellStrictMode(logs, snap()));
   applyBatch(fixFlakyStageContinueOnError(logs, snap()));
-  applyBatch(fixGitLabIncrementalPipeline(snap()));
-  applyBatch(fixWorkflowRunWait(snap()));
-  applyBatch(fixGitLabStageOrdering(snap()));
-  applyBatch(fixGitLabDAGPipeline(snap()));
+  staticRule(fixGitLabIncrementalPipeline);
+  staticRule(fixWorkflowRunWait);
+  staticRule(fixGitLabStageOrdering);
+  staticRule(fixGitLabDAGPipeline);
   applyBatch(fixSelfReferentialNeeds(logs, snap()));
   applyBatch(fixTwoJobCircularChain(logs, snap()));
-  applyBatch(fixPushBranchFilter(snap()));
+  staticRule(fixPushBranchFilter);
   applyBatch(fixCronScheduleExpression(logs, snap()));
-  applyBatch(fixWorkflowCallContract(snap()));
+  staticRule(fixWorkflowCallContract);
   applyBatch(fixRunnerGroupFallback(logs, snap()));
   applyBatch(fixLargerRunnerSpec(logs, snap()));
   applyBatch(fixStepLevelTimeout(logs, snap()));
@@ -2483,10 +2624,10 @@ export function applyRuleBasedFixes(
   applyBatch(fixArtifactCompression(logs, snap()));
   applyBatch(fixCachePathMismatch(logs, snap()));
   applyBatch(fixCacheBust(logs, snap()));
-  applyBatch(fixDownloadAfterUpload(snap()));
-  applyBatch(fixParallelJobOutputPaths(snap()));
-  applyBatch(fixMatrixArtifactFanIn(snap()));
-  applyBatch(fixMatrixFanInSummary(snap()));
+  staticRule(fixDownloadAfterUpload);
+  staticRule(fixParallelJobOutputPaths);
+  staticRule(fixMatrixArtifactFanIn);
+  staticRule(fixMatrixFanInSummary);
   // Config cross-category
   applyBatch(fixGitLabYamlAnchors(logs, snap()));
   applyBatch(fixGitLabJobMissingImage(logs, snap()));
@@ -2509,20 +2650,20 @@ export function applyRuleBasedFixes(
   applyBatch(fixTsConfigExtendsChain(logs, snap()));
   applyBatch(fixDeprecatedTsConfigOptions(logs, snap()));
   applyBatch(fixNpmEnginesRange(logs, snap()));
-  applyBatch(fixDuplicateDockerPort(snap()));
-  applyBatch(fixDuplicateGitLabStage(snap()));
-  applyBatch(fixDuplicatePackageScript(snap()));
-  applyBatch(fixInputToEnvMapping(snap()));
-  applyBatch(fixJobOutputDeclaration(snap()));
+  staticRule(fixDuplicateDockerPort);
+  staticRule(fixDuplicateGitLabStage);
+  staticRule(fixDuplicatePackageScript);
+  staticRule(fixInputToEnvMapping);
+  staticRule(fixJobOutputDeclaration);
   applyBatch(fixTerraformVarEnv(logs, snap()));
   applyBatch(fixDockerComposeEnvFile(logs, snap()));
   applyBatch(fixK8sSecretEnvMapping(logs, snap()));
   applyBatch(fixMissingAwsRegionMapping(logs, snap()));
   applyBatch(fixGitLabCECompatibility(logs, snap()));
-  applyBatch(fixGitLabVariableScope(snap()));
+  staticRule(fixGitLabVariableScope);
   // Build fixers — cross-category
   applyBatch(fixGradleDaemonOOM(logs, snap()));
-  applyBatch(fixMavenBuildScript(snap()));
+  staticRule(fixMavenBuildScript);
   applyBatch(fixTurboPipelineConfig(logs, snap()));
   applyBatch(fixShellScriptExitCodes(logs, snap()));
   applyBatch(fixJavaCompilationError(logs, snap()));
@@ -2536,38 +2677,38 @@ export function applyRuleBasedFixes(
   applyBatch(fixESMCJSConflict(logs, snap()));
   applyBatch(fixGradleArtifactPath(logs, snap()));
   applyBatch(fixMavenArtifactPath(logs, snap()));
-  applyBatch(fixRustBinaryArtifact(snap()));
-  applyBatch(fixDotNetPublishArtifact(snap()));
-  applyBatch(fixGoArtifactPath(snap()));
-  applyBatch(fixNextExportArtifact(snap()));
-  applyBatch(fixDockerSaveArtifact(snap()));
+  staticRule(fixRustBinaryArtifact);
+  staticRule(fixDotNetPublishArtifact);
+  staticRule(fixGoArtifactPath);
+  staticRule(fixNextExportArtifact);
+  staticRule(fixDockerSaveArtifact);
   applyBatch(fixGradleTaskNotFound(logs, snap()));
   applyBatch(fixMavenGoalNotFound(logs, snap()));
   applyBatch(fixNpmWorkspaceScript(logs, snap()));
   applyBatch(fixTurboMissingTask(logs, snap()));
   applyBatch(fixBazelBuildTarget(logs, snap()));
   applyBatch(fixNodeExperimentalFlags(logs, snap()));
-  applyBatch(fixPython2to3(snap()));
+  staticRule(fixPython2to3);
   applyBatch(fixJavaReleaseFlag(logs, snap()));
   applyBatch(fixDotNetTargetFramework(logs, snap()));
   applyBatch(fixGoModDirective(logs, snap()));
   applyBatch(fixAndroidGradleBuild(logs, snap()));
   // Extended build fixers — cross-category
-  applyBatch(fixGraphQLCodegen(snap()));
-  applyBatch(fixProtobufGenerate(snap()));
-  applyBatch(fixCMakeBuildSetup(snap()));
+  staticRule(fixGraphQLCodegen);
+  staticRule(fixProtobufGenerate);
+  staticRule(fixCMakeBuildSetup);
   applyBatch(fixAngularBuildBudget(logs, snap()));
   applyBatch(fixPostCSSConfig(logs, snap()));
-  applyBatch(fixNuxtNitroPreset(snap()));
-  applyBatch(fixLambdaZipPackage(snap()));
-  applyBatch(fixNuGetPackageOutput(snap()));
-  applyBatch(fixHelmChartPackage(snap()));
-  applyBatch(fixElectronArtifactPath(snap()));
-  applyBatch(fixPythonWheelBuild(snap()));
+  staticRule(fixNuxtNitroPreset);
+  staticRule(fixLambdaZipPackage);
+  staticRule(fixNuGetPackageOutput);
+  staticRule(fixHelmChartPackage);
+  staticRule(fixElectronArtifactPath);
+  staticRule(fixPythonWheelBuild);
   applyBatch(fixMixTask(logs, snap()));
   applyBatch(fixSbtBuildTask(logs, snap()));
-  applyBatch(fixDockerComposeBuildService(snap()));
-  applyBatch(fixOpenSSLLegacyProvider(snap()));
+  staticRule(fixDockerComposeBuildService);
+  staticRule(fixOpenSSLLegacyProvider);
   applyBatch(fixRubyKeywordArgs(logs, snap()));
   applyBatch(fixPHPVersionCompat(logs, snap()));
 
@@ -2640,8 +2781,8 @@ export function applyRuleBasedFixes(
 
   // Deployment cross-category — Section A (rollback)
   applyBatch(fixHelmRollbackOnFailure(logs, snap()));
-  applyBatch(fixKubectlRollbackAnnotation(snap()));
-  applyBatch(fixK8sRollbackHistoryLimit(snap()));
+  staticRule(fixKubectlRollbackAnnotation);
+  staticRule(fixK8sRollbackHistoryLimit);
   applyBatch(fixHerokuReleaseRollback(logs, snap()));
   applyBatch(fixECSRollbackTaskDef(logs, snap()));
   applyBatch(fixCloudRunRollbackRevision(logs, snap()));
@@ -2650,19 +2791,19 @@ export function applyRuleBasedFixes(
   applyBatch(fixDeployRollbackNotification(logs, snap()));
   applyBatch(fixAzureSlotRollback(logs, snap()));
   applyBatch(fixFlyioRollback(logs, snap()));
-  applyBatch(fixArgoRollbackSyncWave(snap()));
+  staticRule(fixArgoRollbackSyncWave);
   // Deployment cross-category — Section B (production deploy)
-  applyBatch(fixProdDeployGatingJob(snap()));
-  applyBatch(fixConcurrentDeployPrevention(snap()));
+  staticRule(fixProdDeployGatingJob);
+  staticRule(fixConcurrentDeployPrevention);
   applyBatch(fixPreDeploySmoke(logs, snap()));
   applyBatch(fixDeployEnvValidation(logs, snap()));
   applyBatch(fixTerraformPlanBeforeApply(logs, snap()));
   applyBatch(fixHelmDryRunFirst(logs, snap()));
-  applyBatch(fixK8sApplyValidation(logs, snap()));
+  if (hardening) applyBatch(fixK8sApplyValidation(logs, snap())); // validation step, not a repair
   applyBatch(fixDeployTimeoutExtension(logs, snap()));
-  applyBatch(fixDockerImageHealthProbe(snap()));
-  applyBatch(fixProdDeployBranchGuard(snap()));
-  applyBatch(fixDeployTaggedRelease(snap()));
+  staticRule(fixDockerImageHealthProbe);
+  staticRule(fixProdDeployBranchGuard);
+  staticRule(fixDeployTaggedRelease);
   // Deployment cross-category — Section C (blue-green)
   applyBatch(fixBlueGreenK8sService(logs, snap()));
   applyBatch(fixBlueGreenALBTargetGroup(logs, snap()));
@@ -2675,7 +2816,7 @@ export function applyRuleBasedFixes(
   applyBatch(fixBlueGreenTTL(logs, snap()));
   // Deployment cross-category — Section D (canary)
   applyBatch(fixCanaryIngressAnnotation(logs, snap()));
-  applyBatch(fixCanaryK8sReplicaCount(snap()));
+  staticRule(fixCanaryK8sReplicaCount);
   applyBatch(fixCanaryMetricAnalysis(logs, snap()));
   applyBatch(fixCanaryRollbackThreshold(logs, snap()));
   applyBatch(fixCanaryCloudRunRevision(logs, snap()));
@@ -2685,12 +2826,12 @@ export function applyRuleBasedFixes(
   applyBatch(fixCanaryHeaderRouting(logs, snap()));
   // Deployment cross-category — Section E (service availability)
   applyBatch(fixServiceStartupProbe(logs, snap()));
-  applyBatch(fixServicePodDisruptionBudget(snap()));
-  applyBatch(fixServiceHPAMinReplicas(snap()));
+  staticRule(fixServicePodDisruptionBudget);
+  staticRule(fixServiceHPAMinReplicas);
   applyBatch(fixServiceGracefulShutdown(logs, snap()));
-  applyBatch(fixServiceTopologySpread(snap()));
+  staticRule(fixServiceTopologySpread);
   applyBatch(fixServiceCircuitBreaker(logs, snap()));
-  applyBatch(fixServiceReadinessGate(snap()));
+  staticRule(fixServiceReadinessGate);
   applyBatch(fixServiceResourceQuota(logs, snap()));
   // Deployment cross-category — Section F (health checks)
   applyBatch(fixHealthCheckEndpointPath(logs, snap()));
@@ -2812,52 +2953,52 @@ export function applyRuleBasedFixes(
   applyBatch(fixDockerBuildContextTooLarge(logs, snap()));
   applyBatch(fixDockerBuildArgMissing(logs, snap()));
   applyBatch(fixDockerMultiStageBuild(logs, snap()));
-  applyBatch(fixDockerRUNLayerMerge(snap()));
-  applyBatch(fixDockerAPTGetUpdate(snap()));
-  applyBatch(fixDockerNPMInstallProd(snap()));
-  applyBatch(fixDockerPipNoCacheDir(snap()));
-  applyBatch(fixDockerCopyOrderForCache(snap()));
-  applyBatch(fixDockerShellToExecForm(snap()));
+  staticRule(fixDockerRUNLayerMerge);
+  staticRule(fixDockerAPTGetUpdate);
+  staticRule(fixDockerNPMInstallProd);
+  staticRule(fixDockerPipNoCacheDir);
+  staticRule(fixDockerCopyOrderForCache);
+  staticRule(fixDockerShellToExecForm);
   applyBatch(fixDockerBuildPlatformArg(logs, snap()));
   applyBatch(fixDockerQEMUSetup(logs, snap()));
-  applyBatch(fixDockerLayerCleanup(snap()));
+  staticRule(fixDockerLayerCleanup);
   // Docker cross-category — Section B (layer cache)
-  applyBatch(fixDockerGHACacheMount(snap()));
-  applyBatch(fixDockerRegistryLayerCache(snap()));
+  staticRule(fixDockerGHACacheMount);
+  staticRule(fixDockerRegistryLayerCache);
   applyBatch(fixDockerManifestUnknown(logs, snap()));
   applyBatch(fixDockerPullRetryOnBlob(logs, snap()));
-  applyBatch(fixDockerBuildKitCacheMount(snap()));
-  applyBatch(fixDockerSetupBuildx(snap()));
-  applyBatch(fixDockerMetadataAction(snap()));
-  applyBatch(fixDockerServicePullPolicy(snap()));
+  staticRule(fixDockerBuildKitCacheMount);
+  staticRule(fixDockerSetupBuildx);
+  staticRule(fixDockerMetadataAction);
+  staticRule(fixDockerServicePullPolicy);
   // Docker cross-category — Section C (Dockerfile syntax)
   applyBatch(fixDockerfileHeredocSyntax(logs, snap()));
   applyBatch(fixDockerfileEnvVsArg(logs, snap()));
-  applyBatch(fixDockerfileCmdEntrypointInteraction(snap()));
+  staticRule(fixDockerfileCmdEntrypointInteraction);
   applyBatch(fixDockerfileJSONArraySyntax(logs, snap()));
-  applyBatch(fixDockerfileAddVsCopy(snap()));
-  applyBatch(fixDockerfileWorkdirAbsolute(snap()));
-  applyBatch(fixDockerfileLabelFormat(snap()));
-  applyBatch(fixDockerfileNonRootUser(snap()));
-  applyBatch(fixDockerignoreSecrets(snap()));
+  staticRule(fixDockerfileAddVsCopy);
+  staticRule(fixDockerfileWorkdirAbsolute);
+  staticRule(fixDockerfileLabelFormat);
+  staticRule(fixDockerfileNonRootUser);
+  staticRule(fixDockerignoreSecrets);
   applyBatch(fixDockerfileWildcardCopy(logs, snap()));
   // Docker cross-category — Section D (startup)
-  applyBatch(fixDockerTiniInit(snap()));
-  applyBatch(fixDockerEntrypointEnvCheck(snap()));
+  staticRule(fixDockerTiniInit);
+  staticRule(fixDockerEntrypointEnvCheck);
   applyBatch(fixDockerWaitForDependencies(logs, snap()));
-  applyBatch(fixDockerStopSignal(snap()));
-  applyBatch(fixDockerTimezone(snap()));
+  staticRule(fixDockerStopSignal);
+  staticRule(fixDockerTimezone);
   applyBatch(fixDockerUlimits(logs, snap()));
   applyBatch(fixDockerResourceLimits(logs, snap()));
   applyBatch(fixDockerRestartPolicy(logs, snap()));
-  applyBatch(fixDockerLoggingConfig(snap()));
-  applyBatch(fixDockerStartupHealthcheck(snap()));
+  staticRule(fixDockerLoggingConfig);
+  staticRule(fixDockerStartupHealthcheck);
   // Docker cross-category — Section E (ports)
   applyBatch(fixDockerRandomPortAssignment(logs, snap()));
   applyBatch(fixDockerNetworkSubnetConflict(logs, snap()));
   applyBatch(fixDockerIPv6BindingConflict(logs, snap()));
-  applyBatch(fixDockerComposePortFormat(snap()));
-  applyBatch(fixDockerServiceContainerPorts(snap()));
+  staticRule(fixDockerComposePortFormat);
+  staticRule(fixDockerServiceContainerPorts);
   // Docker cross-category — Section F (registry auth)
   applyBatch(fixDockerGHCRLogin(logs, snap()));
   applyBatch(fixDockerECRLogin(logs, snap()));
@@ -2865,24 +3006,24 @@ export function applyRuleBasedFixes(
   applyBatch(fixDockerGARLoginStep(logs, snap()));
   applyBatch(fixDockerHubAccessToken(logs, snap()));
   applyBatch(fixDockerPrivateRegistryCA(logs, snap()));
-  applyBatch(fixDockerCredentialHelper(snap()));
+  staticRule(fixDockerCredentialHelper);
   // Docker cross-category — Section G (image pull)
-  applyBatch(fixDockerImageDigestPin(snap()));
+  staticRule(fixDockerImageDigestPin);
   applyBatch(fixDockerRegistryPathFormat(logs, snap()));
   applyBatch(fixDockerTagFallback(logs, snap()));
   applyBatch(fixDockerComposePrivateImageAuth(logs, snap()));
   applyBatch(fixDockerAlpineApkMirror(logs, snap()));
-  applyBatch(fixDockerTrivyScanStep(snap()));
+  staticRule(fixDockerTrivyScanStep);
   applyBatch(fixDockerPullPlatformMismatch(logs, snap()));
   // Docker cross-category — Section H (volumes)
-  applyBatch(fixDockerNamedVolumes(snap()));
+  staticRule(fixDockerNamedVolumes);
   applyBatch(fixDockerVolumeSelinuxLabel(logs, snap()));
   applyBatch(fixDockerBindMountAbsolutePath(logs, snap()));
-  applyBatch(fixDockerVolumeReadOnly(snap()));
+  staticRule(fixDockerVolumeReadOnly);
   applyBatch(fixDockerTmpfsMount(logs, snap()));
   applyBatch(fixDockerNFSVolumeOptions(logs, snap()));
   applyBatch(fixDockerVolumeDriverConfig(logs, snap()));
-  applyBatch(fixDockerComposeInit(snap()));
+  staticRule(fixDockerComposeInit);
   // API cross-category — Section A (timeout)
   applyBatch(fixAPIConnectTimeout(logs, snap()));
   applyBatch(fixAxiosTimeout(logs, snap()));
@@ -2948,13 +3089,13 @@ export function applyRuleBasedFixes(
   applyBatch(fixGraphQLCORSHeaders(logs, snap()));
   applyBatch(fixGraphQLBatchRequest(logs, snap()));
   // API cross-category — Section H (REST endpoint)
-  applyBatch(fixRESTBaseURLEnvVar(snap()));
+  staticRule(fixRESTBaseURLEnvVar);
   applyBatch(fixRESTVersionPrefix(logs, snap()));
   applyBatch(fixRESTMethodMismatch(logs, snap()));
   applyBatch(fixRESTTrailingSlash(logs, snap()));
   applyBatch(fixRESTAuthHeader(logs, snap()));
   applyBatch(fixRESTContentTypeHeader(logs, snap()));
-  applyBatch(fixRESTEndpointEnvMatrix(snap()));
+  staticRule(fixRESTEndpointEnvMatrix);
   applyBatch(fixRESTIdempotencyHeader(logs, snap()));
   applyBatch(fixRESTResponseTimeLogging(logs, snap()));
   // Runtime cross-category
@@ -3006,17 +3147,50 @@ export function applyRuleBasedFixes(
   // CODE — surgical source edits (all log-gated: each fires only when the CI
   // output names the exact problem, and edits only the file/line it names)
   // ════════════════════════════════════════════════════════════════════════
-  applyBatch(fixCompilerSuggestions(logs, snap()));
-  applyBatch(fixUnusedImports(logs, snap()));
-  applyBatch(fixPythonUnusedImports(logs, snap()));
-  applyBatch(fixPreferConst(logs, snap()));
-  applyBatch(fixDebuggerStatements(logs, snap()));
-  applyBatch(fixWhitespaceLint(logs, snap()));
-  applyBatch(fixFocusedTests(logs, snap()));
-  applyBatch(fixUnusedTsExpectError(logs, snap()));
-  applyBatch(fixNullDerefAtStackFrame(logs, snap()));
+  // Removed lines stay as placeholders until every line-precise fixer has run, so each
+  // one edits the line the tool reported. Python lint runs last: B006 inserts lines.
+  // Format-exact parsers (compiler / linter rows with file:line) read the complete logs.
+  withStableLineNumbers(() => {
+    applyBatch(fixCompilerSuggestions(reportLogs, snap()));
+    applyBatch(fixUnusedImports(reportLogs, snap()));
+    applyBatch(fixPythonUnusedImports(reportLogs, snap()));
+    applyBatch(fixPreferConst(reportLogs, snap()));
+    applyBatch(fixEslintRuleViolations(reportLogs, snap()));
+    applyBatch(fixDebuggerStatements(logs, snap()));
+    applyBatch(fixWhitespaceLint(logs, snap()));
+    applyBatch(fixFocusedTests(logs, snap()));
+    applyBatch(fixUnusedTsExpectError(reportLogs, snap()));
+    applyBatch(fixMissingExport(reportLogs, snap()));
+    applyBatch(fixNullDerefAtStackFrame(logs, snap()));
+    applyBatch(fixPythonModulePath(logs, snap()));
+    applyBatch(fixPyYamlLoad(logs, snap()));
+    applyBatch(fixPythonLintViolations(reportLogs, snap()));
+  });
+  for (const [path, content] of working) if (hasLinePlaceholders(content)) working.set(path, stripLinePlaceholders(content));
   applyBatch(fixMissingNpmPackage(logs, snap()));
   applyBatch(fixMissingPythonPackage(logs, snap()));
+
+  // ════════════════════════════════════════════════════════════════════════
+  // MANIFESTS — dependency versions, engines, test environment (log-gated,
+  // each edits the manifest governing the failing job's directory)
+  // ════════════════════════════════════════════════════════════════════════
+  applyBatch(fixUnavailablePinnedVersion(reportLogs, snap()));
+  applyBatch(fixIncompatiblePythonPins(reportLogs, snap()));
+  applyBatch(fixVulnerableDependencies(reportLogs, snap()));
+  applyBatch(fixNodeEngineMismatch(logs, snap()));
+  applyBatch(fixJestEnvironmentMissing(logs, snap()));
+  applyBatch(fixMissingRequirementsFile(logs, snap()));
+  applyBatch(fixVirtualenvNotCreated(logs, snap()));
+  applyBatch(fixChmodScript(logs, snap())); // log-gated: only scripts the log reports as "Permission denied"
+  applyBatch(fixDockerfilePath(logs, snap()));
+  applyBatch(fixDockerfileUnknownInstruction(logs, snap()));
+  applyBatch(fixMissingBindSource(logs, snap()));
+  applyBatch(fixZeroRevisionHistory(logs, snap()));
+  applyBatch(fixArtifactPathMismatch(logs, snap()));
+  // GitLab rejects only:/except: here ("config contains unknown keys: only") — rules: is the repair, not a preference
+  if (/contains unknown keys?:\s*(?:only|except)\b/.test(logs)) applyBatch(fixGitLabOnlyExceptToRules(snap()));
+  staticRule(fixComposeHostPortCollision);
+  staticRule(fixK8sSelectorLabelMismatch);
 
   // Build output — one RuleFix per modified file
   return [...explanations.entries()].map(([path, exps]) => ({

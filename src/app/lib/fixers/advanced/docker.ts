@@ -185,6 +185,9 @@ export function fixPortBindingConflict(logs: string, files: Array<{ path: string
     // Fix in docker-compose files
     if (f.path.includes('docker-compose')) {
       if (!f.content.includes(`${conflictPort}:`)) continue;
+      // Two services in this file publish the port — that internal collision is
+      // repaired precisely by fixComposeHostPortCollision (first owner keeps it).
+      if ((f.content.match(new RegExp(`["'\\s-]${conflictPort}:\\d+`, 'g')) ?? []).length > 1) continue;
       const fixed = f.content.replace(
         new RegExp(`["']?(${conflictPort}):(\\d+)["']?`, 'g'),
         `"${alternativePort}:$2"  # aegis: port ${conflictPort} was in use, remapped`,

@@ -1,0 +1,30 @@
+# Aegis fix catalog #087 — Matrix tests a Node version the package does not support
+#
+# Tier:       3 · Intermediate
+# Category:   matrix_failure
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | npm ERR! code EBADENGINE
+#   | npm ERR! engine Unsupported engine
+#   | npm ERR! notsup Required: {"node":">=20"}
+#   | npm ERR! notsup Actual:   {"npm":"10.8.2","node":"v18.20.4"}
+#   | The strategy configuration was canceled because "build.node_18" failed
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Aligned CI Node versions with package.json engines: job "build" matrix drops 18 (package.json requires node >=20) — npm refuses to install (EBADENGINE) when the runner's Node is outside the declared range
+#
+# Apply:      git apply 03-intermediate/087-matrix_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -20,7 +20,7 @@
+     timeout-minutes: 15
+     strategy:
+       matrix:
+-        node: [18, 20, 22]
++        node: [20, 22]
+     steps:
+       - uses: actions/checkout@v4
+       - uses: actions/setup-node@v4

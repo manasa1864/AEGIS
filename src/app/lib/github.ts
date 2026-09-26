@@ -23,6 +23,8 @@ export interface WorkflowRun {
   created_at: string;
   head_sha?: string;
   head_branch?: string;
+  /** Workflow file, e.g. ".github/workflows/ci.yml" */
+  path?: string;
   head_commit: { message: string; id: string };
 }
 
@@ -185,8 +187,10 @@ export async function getJobLogs(pat: string, owner: string, repo: string, jobId
     });
     if (!res.ok) return '';
     const text = await res.text();
-    const lines = text.split('\n').map(l => l.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z /, '').trim()).filter(Boolean);
-    return lines.slice(-300).join('\n');
+    // Keep leading indentation — linters and tracebacks encode structure in it
+    // (ESLint prints "  12:5  error …" under a file header).
+    const lines = text.split('\n').map(l => l.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z /, '').trimEnd()).filter(Boolean);
+    return lines.slice(-600).join('\n');
   } catch {
     return '';
   }
@@ -527,6 +531,15 @@ export async function findRunOnBranch(
 export interface TreeEntry { path: string; mode: string; sha: string; type: string }
 
 /** Every blob in a commit's tree (path → mode + blob sha). */
+/** Every file path in the repo at `ref` (branch, tag or sha) — null when the API refuses.
+ *  A truncated listing (very large repos) is still returned: it only limits lookups. */
+export async function listRepoPaths(pat: string, owner: string, repo: string, ref: string): Promise<string[] | null> {
+  const res = await fetch(`${BASE}/repos/${owner}/${repo}/git/trees/${encRef(ref)}?recursive=1`, { headers: h(pat) }).catch(() => null);
+  if (!res?.ok) return null;
+  const d = await res.json().catch(() => null);
+  return Array.isArray(d?.tree) ? (d.tree as TreeEntry[]).filter(e => e.type === 'blob').map(e => e.path) : null;
+}
+
 export async function getTreeEntries(pat: string, owner: string, repo: string, commitSha: string): Promise<Map<string, TreeEntry> | null> {
   const res = await fetch(`${BASE}/repos/${owner}/${repo}/git/trees/${commitSha}?recursive=1`, { headers: h(pat) }).catch(() => null);
   if (!res?.ok) return null;

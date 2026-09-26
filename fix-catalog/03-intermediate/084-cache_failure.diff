@@ -1,0 +1,26 @@
+# Aegis fix catalog #084 — setup-node dependency cache with no lockfile committed
+#
+# Tier:       3 · Intermediate
+# Category:   cache_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error: Some specified paths were not resolved, unable to cache dependencies.
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Removed npm cache block — no lockfile committed
+#     - setup-node cache fails without a lockfile
+#     - commit package-lock.json or switch to a manual actions/cache step
+#
+# Apply:      git apply 03-intermediate/084-cache_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -23,6 +23,5 @@
+       - uses: actions/setup-node@v4
+         with:
+           node-version: 20
+-          cache: npm
+       - run: npm install
+       - run: npm test

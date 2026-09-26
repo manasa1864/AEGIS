@@ -1,0 +1,13 @@
+# Aegis fix catalog #111 — Expired / invalid API token
+#
+# Tier:       4 · Advanced
+# Category:   invalid_token (auto-diagnosed from the log below)
+# Engine:     reported to the repo owner
+#
+# CI log:
+#   | HttpError: Bad credentials
+#   |   status: 401 Unauthorized
+#   | token expired or revoked
+#
+# How it is solved:
+#   An expired or revoked token has to be re-issued and saved as a repo secret by its owner. Making the step non-blocking would hide the failure, so Aegis reports it instead.

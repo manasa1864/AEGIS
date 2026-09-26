@@ -1,0 +1,25 @@
+# Aegis fix catalog #038 — Imported name is declared but never exported (TS2459)
+#
+# Tier:       2 · Source code
+# Category:   compilation_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | test/orders.test.ts(2,10): error TS2459: Module '"../src/index"' declares 'app' locally, but it is not exported.
+#
+# How it is solved:
+#   MODIFY src/index.ts
+#     - Exported 'app' (imported by test/orders.test.ts) — the module declares it at top level but never exported it, so the import failed to compile (TS2459/TS2305)
+#
+# Apply:      git apply 02-code/038-code-ts-missing-export.diff
+diff --git a/src/index.ts b/src/index.ts
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,6 +1,6 @@
+ import express from 'express';
+ 
+-const app = express();
++export const app = express();
+ app.get('/health', (_req, res) => res.send('ok'));
+ 
+ app.listen(3000);

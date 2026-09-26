@@ -1,0 +1,43 @@
+# Aegis fix catalog #090 — GitLab stage failure with no retry policy
+#
+# Tier:       3 · Intermediate
+# Category:   pipeline_stage_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | ERROR: Job failed: exit code 1
+#   | stage test failed — pipeline stage error (runner_system_failure)
+#
+# How it is solved:
+#   MODIFY .gitlab-ci.yml
+#     - Added retry: max: 2 with when: conditions to GitLab CI jobs — transient failures (runner crash, network timeout, stuck jobs) will be retried automatically
+#     - when: conditions ensure we only retry infrastructure failures, not code failures
+#
+# Apply:      git apply 03-intermediate/090-pipeline_stage_failure.diff
+diff --git a/.gitlab-ci.yml b/.gitlab-ci.yml
+--- a/.gitlab-ci.yml
++++ b/.gitlab-ci.yml
+@@ -3,6 +3,11 @@
+   - test
+ 
+ build:
++  retry:
++    max: 2
++    when:
++      - runner_system_failure
++      - stuck_or_timeout_failure
+   stage: build
+   image: node:20
+   script:
+@@ -10,6 +15,11 @@
+     - npm run build
+ 
+ test:
++  retry:
++    max: 2
++    when:
++      - runner_system_failure
++      - stuck_or_timeout_failure
+   stage: test
+   image: node:20
+   script:

@@ -10,7 +10,8 @@
 #
 # How it is solved:
 #   MODIFY .github/workflows/ci.yml
-#     - Updated node-version to 20 to match package.json engines.node=">=20" — running a different Node version silently breaks modules that use version-specific APIs
+#     - Updated node-version to 20 — EBADENGINE: a dependency requires Node 20+
+#     - the runner was using a lower version
 #
 # Apply:      git apply 01-simple/006-runtime_version_error.diff
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml

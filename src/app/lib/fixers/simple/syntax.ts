@@ -286,9 +286,10 @@ export function fixChmodScript(logs: string, files: Array<{ path: string; conten
   // Extract ALL scripts mentioned — sometimes multiple scripts are denied
   const scripts = [
     ...[...logs.matchAll(/permission denied[^:]*?[:\s]+([\w/.\-]+\.sh)/gi)].map(m => m[1]),
-    // the usual bash form puts the path first: "./scripts/deploy.sh: Permission denied"
-    ...[...logs.matchAll(/([\w/.\-]+\.sh):\s*Permission denied/gi)].map(m => m[1]),
-  ].map(s => s.replace(/^\.\//, ''));
+    // the usual shell form puts the path first: "./scripts/deploy.sh: Permission denied",
+    // "./gradlew: Permission denied" — any script invoked by relative path
+    ...[...logs.matchAll(/(\.\/[\w/.-]+|[\w/.-]+\.sh):\s*Permission denied/gi)].map(m => m[1]),
+  ].map(s => s.replace(/^\.\//, '')).filter((s, i, all) => s && all.indexOf(s) === i);
   if (scripts.length === 0) return [];
   const fixes: RuleFix[] = [];
   for (const f of files) {
@@ -299,7 +300,7 @@ export function fixChmodScript(logs: string, files: Array<{ path: string; conten
       if (!content.includes(script)) continue;
       // match the command as written in the workflow (with or without ./)
       const fixed = content.replace(
-        new RegExp(`(\\s+run:\\s*)((?:\\./)?${script.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'g'),
+        new RegExp(`(\\s+run:\\s*)((?:\\./)?${script.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})(?![\\w.-])`, 'g'),
         (_, prefix, cmd) => `${prefix}chmod +x ${cmd} && ${cmd}`,
       );
       if (fixed !== content) { content = fixed; changed = true; }
@@ -307,13 +308,14 @@ export function fixChmodScript(logs: string, files: Array<{ path: string; conten
     if (changed)
       fixes.push({ path: f.path, content, explanation: `Added chmod +x for permission-denied scripts — Git does not preserve execute bits on Windows checkouts; scripts need +x before they can run`, confidence: 100 });
   }
-  // Also fix the script files themselves if they lack shebangs
-  for (const script of scripts) {
+  // A shell script without a shebang needs an interpreter line once it is executable.
+  // (Only the shebang — adding `set -e` etc. would change how the script behaves.)
+  for (const script of scripts.filter(s => s.endsWith('.sh'))) {
     const scriptFile = files.find(f => f.path === script || f.path.endsWith(`/${script}`));
     if (scriptFile && !scriptFile.content.startsWith('#!')) {
       fixes.push({
         path: scriptFile.path,
-        content: `#!/bin/bash\nset -euo pipefail\n\n${scriptFile.content}`,
+        content: `#!/usr/bin/env bash\n${scriptFile.content}`,
         explanation: `Added shebang to ${scriptFile.path} — file lacked interpreter declaration; permission denied is worse without it`,
         confidence: 100,
       });
@@ -1101,18 +1103,20 @@ export function fixInvalidCronExpression(files: Array<{ path: string; content: s
     if (!f.content.includes('schedule:') || !f.content.includes('cron:')) continue;
     let content = f.content;
     let changed = false;
-    // Fix field count (must be exactly 5: minute hour day month weekday)
-    content = content.replace(/cron:\s*['"]([\d\s*/,\-]+)['"]/g, (match, expr) => {
-      const parts = expr.trim().split(/\s+/);
-      if (parts.length === 4) {
-        changed = true;
-        return `cron: '${parts.join(' ')} *'`; // missing weekday → add *
-      }
-      if (parts.length === 6) {
-        changed = true;
-        return `cron: '${parts.slice(1).join(' ')}'`; // 6 fields → drop seconds (not supported)
-      }
-      return match;
+    const ranged: string[] = [];
+    // Fix field count (must be exactly 5: minute hour day month weekday), then
+    // clamp out-of-range values — GitHub rejects the whole workflow file for either.
+    content = content.replace(/cron:[ \t]*(['"]?)([\d \t*/,-]+?)\1([ \t]*(?:#.*)?)$/gm, (match, q, expr, tail) => {
+      let parts = expr.trim().split(/\s+/);
+      if (parts.length === 4) parts = [...parts, '*'];          // missing weekday → add *
+      else if (parts.length === 6) parts = parts.slice(1);      // 6 fields → drop seconds (not supported)
+      if (parts.length !== 5) return match;
+      const fixed = clampCronFields(parts);
+      if (fixed.join(' ') !== parts.join(' ')) ranged.push(`'${parts.join(' ')}' → '${fixed.join(' ')}'`);
+      const next = `cron: ${q || "'"}${fixed.join(' ')}${q || "'"}${tail}`;
+      if (fixed.join(' ') === expr.trim()) return match;
+      changed = true;
+      return next;
     });
     // GitHub minimum schedule is every 5 minutes — fix overly frequent schedules
     content = content.replace(/cron:\s*['"](\*\/[1-4]\s+\*\s+\*\s+\*\s+\*)['"]/, "cron: '*/5 * * * *'");
@@ -1123,9 +1127,25 @@ export function fixInvalidCronExpression(files: Array<{ path: string; content: s
     content = content.replace(/cron:\s*['"]@weekly['"]/, "cron: '0 0 * * 0'");
     content = content.replace(/cron:\s*['"]@monthly['"]/, "cron: '0 0 1 * *'");
     if (changed || content !== f.content)
-      fixes.push({ path: f.path, content, explanation: 'Fixed cron expression — GitHub Actions requires exactly 5 fields (minute hour day month weekday), minimum interval is every 5 minutes, and named shortcuts (@daily etc.) are not supported', confidence: 100 });
+      fixes.push({ path: f.path, content, explanation: `Fixed cron expression${ranged.length ? ` (${ranged.join(', ')}: field values were outside their allowed range and were clamped to the nearest valid value)` : ''} — GitHub Actions requires exactly 5 fields (minute 0-59, hour 0-23, day 1-31, month 1-12, weekday 0-6) and rejects the whole workflow file otherwise; minimum interval is every 5 minutes, and named shortcuts (@daily etc.) are not supported`, confidence: 100 });
   }
   return fixes;
+}
+
+const CRON_RANGES: Array<[number, number]> = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+
+/** Clamp every number in each cron field (lists, ranges, steps) into the field's legal range. */
+function clampCronFields(parts: string[]): string[] {
+  return parts.map((field, i) => {
+    const [lo, hi] = CRON_RANGES[i];
+    return field.split(',').map(item => {
+      const [base, step] = item.split('/');
+      const clamp = (n: string) => String(Math.min(hi, Math.max(lo, Number(n))));
+      const fixedBase = base === '*' ? base : base.split('-').map(n => (/^\d+$/.test(n) ? clamp(n) : n)).join('-');
+      const fixedStep = step === undefined ? '' : `/${/^\d+$/.test(step) ? String(Math.min(Math.max(1, Number(step)), hi - lo + 1)) : step}`;
+      return fixedBase + fixedStep;
+    }).join(',');
+  });
 }
 
 /** Replace deprecated GitLab CI only:/except: with rules: syntax. */

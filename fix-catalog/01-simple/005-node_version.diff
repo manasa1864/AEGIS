@@ -12,7 +12,8 @@
 #
 # How it is solved:
 #   MODIFY .github/workflows/ci.yml
-#     - Updated node-version to 20 to match package.json engines.node=">=20" — running a different Node version silently breaks modules that use version-specific APIs
+#     - Pinned node-version to 20 (LTS) — specified version is unavailable on GitHub runners
+#     - Node 20 is current LTS with widest ecosystem compatibility
 #
 # Apply:      git apply 01-simple/005-node_version.diff
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml

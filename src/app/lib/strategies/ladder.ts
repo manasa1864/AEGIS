@@ -34,6 +34,8 @@ export interface LadderInput {
   repoKey: string;                  // owner/repo
   signature: string;                // errorSignature(logs, categories)
   logs: string;
+  /** Complete job logs (reports such as npm audit) — `logs` is the error-focused text. */
+  fullLogs?: string;
   categories: ErrorCategory[];
   diagnoses: ErrorDiagnosis[];
   files: RepoFile[];                // context files (with blob sha on GitHub)
@@ -100,7 +102,7 @@ export async function runHealingLadder(input: LadderInput): Promise<LadderResult
   // ── 2. Deterministic rules + compiler suggestions ────────────────────────
   mark('rules', 'active');
   const allUnknown = categories.every(c => c === 'unknown');
-  const ruleFixes = allUnknown ? [] : applyRuleBasedFixes(categories, input.logs, files);
+  const ruleFixes = allUnknown ? [] : applyRuleBasedFixes(categories, input.logs, files, { reportLogs: input.fullLogs });
   const merged = [...ruleFixes];
   for (const s of input.staticFixes ?? []) if (!merged.some(f => f.path === s.path)) merged.push({ ...s, confidence: 90 });
   if (merged.length > 0) {

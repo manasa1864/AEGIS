@@ -1,0 +1,27 @@
+# Aegis fix catalog #106 — GHCR push without login / packages permission
+#
+# Tier:       4 · Advanced
+# Category:   registry_auth_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | denied: installation not allowed to Write organization package
+#   | ERROR: push access denied to registry ghcr.io — unauthorized registry push
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added packages: write — pushing to ghcr.io requires this permission on the GITHUB_TOKEN
+#     - also ensure the package visibility allows the workflow
+#
+# Apply:      git apply 04-advanced/106-registry_auth_failure.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -8,6 +8,7 @@
+   pull_request:
+ permissions:
+   contents: read
++  packages: write
+ concurrency:
+   group: ci-${{ github.ref }}
+   cancel-in-progress: true

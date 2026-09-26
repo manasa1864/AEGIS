@@ -1,0 +1,23 @@
+# Aegis fix catalog #103 — Dockerfile instruction glued to its arguments
+#
+# Tier:       4 · Advanced
+# Category:   dockerfile_syntax (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | ERROR: failed to solve: dockerfile parse error on line 5: unknown instruction: CMD["node",
+#
+# How it is solved:
+#   MODIFY Dockerfile
+#     - Fixed Dockerfile instructions the parser rejected (line 5: space between CMD and its arguments) — docker build stops at the first unknown instruction
+#
+# Apply:      git apply 04-advanced/103-dockerfile_syntax.diff
+diff --git a/Dockerfile b/Dockerfile
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -2,4 +2,4 @@
+ WORKDIR /app
+ COPY . .
+ RUN npm ci
+-CMD["node", "server.js"]
++CMD ["node", "server.js"]

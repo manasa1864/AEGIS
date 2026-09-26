@@ -1,0 +1,13 @@
+# Aegis fix catalog #126 — OpenAPI lint gate blocks every build
+#
+# Tier:       4 · Advanced
+# Category:   schema_validation (auto-diagnosed from the log below)
+# Engine:     AI step (no deterministic rule applies)
+#
+# CI log:
+#   | openapi.yaml
+#   |   12:7  error  oas3-schema  "responses" property must have required property "200".
+#   | schema validation failed — JSON Schema error
+#
+# How it is solved:
+#   The spec is genuinely invalid (an operation with no success response). Writing the missing response needs API knowledge, so the AI step drafts it; the gate itself is never switched off.

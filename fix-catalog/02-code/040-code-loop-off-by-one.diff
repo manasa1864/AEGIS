@@ -1,0 +1,40 @@
+# Aegis fix catalog #040 — Loop reads one past the end of an array (i <= arr.length)
+#
+# Tier:       2 · Source code
+# Category:   null_reference (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | TypeError: Cannot read properties of undefined (reading 'qty')
+#   |     at calculateTotal (/home/runner/work/app/app/src/pricing.ts:4:28)
+#   |     at Object.<anonymous> (/home/runner/work/app/app/test/pricing.test.ts:5:12)
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added --unhandled-rejections=throw — TypeError silently passed CI
+#   MODIFY src/pricing.ts
+#     - Fixed an off-by-one loop bound at src/pricing.ts:3 (i <= items.length → i < items.length) — the last iteration read items[items.length], which is undefined, causing "Cannot read properties of undefined (reading 'qty')"
+#
+# Apply:      git apply 02-code/040-code-loop-off-by-one.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,6 +14,7 @@
+ env:
+   CI: 'true'
+   NODE_ENV: test
++  NODE_OPTIONS: --unhandled-rejections=throw
+ jobs:
+   build:
+     runs-on: ubuntu-latest
+diff --git a/src/pricing.ts b/src/pricing.ts
+--- a/src/pricing.ts
++++ b/src/pricing.ts
+@@ -1,6 +1,6 @@
+ export function calculateTotal(items: { qty: number; unitPrice: number }[]): number {
+   let subtotal = 0;
+-  for (let i = 0; i <= items.length; i++) {
++  for (let i = 0; i < items.length; i++) {
+     subtotal += items[i].qty * items[i].unitPrice;
+   }
+   return subtotal;

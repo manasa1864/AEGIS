@@ -1,0 +1,29 @@
+# Aegis fix catalog #089 — GitLab job uses an undeclared stage
+#
+# Tier:       3 · Intermediate
+# Category:   stage_order_error (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Found errors in your .gitlab-ci.yml:
+#   | deploy job: chosen stage does not exist; available stages are .pre, build, test, .post
+#   | stage deploy not defined in pipeline
+#
+# How it is solved:
+#   MODIFY .gitlab-ci.yml
+#     - Added missing stages [deploy] to GitLab CI stages declaration — jobs reference stages not declared in the stages: list
+#     - GitLab rejects pipelines with unknown stages
+#
+# Apply:      git apply 03-intermediate/089-stage_order_error.diff
+diff --git a/.gitlab-ci.yml b/.gitlab-ci.yml
+--- a/.gitlab-ci.yml
++++ b/.gitlab-ci.yml
+@@ -1,7 +1,7 @@
+ stages:
+   - build
+   - test
+-
++  - deploy
+ build:
+   stage: build
+   image: node:20

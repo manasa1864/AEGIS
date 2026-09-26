@@ -11,8 +11,6 @@
 #
 # How it is solved:
 #   MODIFY .github/workflows/ci.yml
-#     - Added env: block to expose secrets as environment variables — shell scripts access secrets via $VAR_NAME, not ${{ secrets.X }}
-#     - secrets must be mapped to env vars explicitly for subprocesses to read them
 #     - Added default API_URL='http://localhost:3000/api' — env var was missing
 #     - app/test framework crashed because it expected the variable to exist
 #
@@ -28,11 +26,3 @@ diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
  jobs:
    build:
      runs-on: ubuntu-latest
-@@ -25,4 +26,6 @@
-           node-version: 20
-           cache: npm
-       - run: npm ci
--      - run: node scripts/smoke.js --url "$API_URL"
-+      - env:
-+          API_URL: ${{ secrets.API_URL }}
-+        run: node scripts/smoke.js --url "$API_URL"

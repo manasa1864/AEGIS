@@ -1,0 +1,28 @@
+# Aegis fix catalog #109 — Bind mount path invalid on the runner
+#
+# Tier:       4 · Advanced
+# Category:   volume_mount_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error response from daemon: invalid mount config for type "bind": bind source path does not exist: /data
+#   | volume mount failed
+#
+# How it is solved:
+#   MODIFY docker-compose.yml
+#     - Replaced host bind mount /data with named volume data-data — the host directory does not exist on the runner, so the container could not start
+#     - compose creates named volumes itself. Keep the bind mount in a local override file if you need host data
+#
+# Apply:      git apply 04-advanced/109-volume_mount_failure.diff
+diff --git a/docker-compose.yml b/docker-compose.yml
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -11,4 +11,7 @@
+     environment:
+       POSTGRES_PASSWORD: postgres
+     volumes:
+-      - /data:/var/lib/postgresql/data
++      - data-data:/var/lib/postgresql/data
++
++volumes:
++  data-data:

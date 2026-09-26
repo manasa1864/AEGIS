@@ -1,0 +1,12 @@
+# Aegis fix catalog #139 — Load balancer marks targets unhealthy
+#
+# Tier:       4 · Advanced
+# Category:   load_balancer_issue (auto-diagnosed from the log below)
+# Engine:     AI step (no deterministic rule applies)
+#
+# CI log:
+#   | ALB target group health check failing: 503 Service Unavailable from load balancer
+#   | Target.ResponseCodeMismatch
+#
+# How it is solved:
+#   An unhealthy target is a wrong health-check path/port or an app that does not start; which one depends on the service code and infra, so the AI step investigates with the logs and manifests.

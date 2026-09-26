@@ -1,0 +1,12 @@
+# Aegis fix catalog #105 — Service image pull denied / not found
+#
+# Tier:       4 · Advanced
+# Category:   image_pull_failure (auto-diagnosed from the log below)
+# Engine:     flaky check — re-runs the failed jobs, no code change
+#
+# CI log:
+#   | Error response from daemon: pull access denied for acme/api, repository does not exist or may require 'docker login'
+#   | manifest unknown docker
+#
+# How it is solved:
+#   Registry pull failures are often transient, so the flaky check re-runs first. A wrong image name or a private image needing credentials then goes to the AI step / the repo owner.

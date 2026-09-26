@@ -1,0 +1,48 @@
+# Aegis fix catalog #037 — ruff/flake8 rules with a standard rewrite (E711, E722, F541, B006)
+#
+# Tier:       2 · Source code
+# Category:   lint_failure
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | worker/report.py:4:21: B006 Do not use mutable data structures for argument defaults
+#   | worker/report.py:6:14: F541 [*] f-string without any placeholders
+#   | worker/report.py:9:14: E711 Comparison to `None` should be `cond is None`
+#   | worker/report.py:15:5: E722 Do not use bare `except`
+#   | Found 4 errors.
+#
+# How it is solved:
+#   MODIFY worker/report.py
+#     - Fixed Python lint violations with their standard rewrite: bare except at line 15
+#     - None comparison at line 9
+#     - f-string without placeholders at line 6
+#     - mutable default argument out at line 4 — behaviour is preserved (a mutable default is now created fresh per call, which is what the code intended)
+#
+# Apply:      git apply 02-code/037-code-python-lint.diff
+diff --git a/worker/report.py b/worker/report.py
+--- a/worker/report.py
++++ b/worker/report.py
+@@ -1,17 +1,19 @@
+ import json
+ 
+ 
+-def build_report(orders, out=[]):
++def build_report(orders, out=None):
+     '''Summarise orders.'''
+-    header = f"customer,total"
++    if out is None:
++        out = []
++    header = "customer,total"
+     lines = [header]
+     for o in orders:
+-        if o == None:
++        if o is None:
+             continue
+         lines.append(json.dumps(o))
+     except_ok = True
+     try:
+         out.append(lines)
+-    except:
++    except Exception:
+         except_ok = False
+     return lines, except_ok

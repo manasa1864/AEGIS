@@ -1,0 +1,12 @@
+# Aegis fix catalog #144 — Canary serving a different version
+#
+# Tier:       4 · Advanced
+# Category:   canary_mismatch (auto-diagnosed from the log below)
+# Engine:     revert to the last green build (validated on CI)
+#
+# CI log:
+#   | canary version mismatch: canary=v2.4.0 stable=v2.3.1 — canary deploy error
+#   | error rate 7.2% exceeds threshold 1%
+#
+# How it is solved:
+#   The canary is failing its error-rate check, which is a regression in the new version, not a config mistake. Reverting to the last green build restores the stable version while the regression is investigated.

@@ -1,0 +1,12 @@
+# Aegis fix catalog #140 — Deployment fails with no rollback
+#
+# Tier:       4 · Advanced
+# Category:   deploy_failure (auto-diagnosed from the log below)
+# Engine:     AI step (no deterministic rule applies)
+#
+# CI log:
+#   | error: deployment "app" exceeded its progress deadline
+#   | Deployment failed — Failed to deploy revision 42
+#
+# How it is solved:
+#   A progress-deadline timeout means the new pods never became ready — a crash, a failing probe or missing config in the release itself. The AI step reads the rollout events and manifests; rule fixes apply when the error names a manifest problem (selector/labels, missing revision history).

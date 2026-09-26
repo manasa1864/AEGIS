@@ -24,10 +24,15 @@ describe('fix catalog', () => {
 
   it('every scenario produces at least one fix, and every fix passes the safety validator', () => {
     for (const b of built) {
+      if (b.entry.resolution) continue;
       expect(b.changes.length, b.slug).toBeGreaterThan(0);
       for (const c of b.changes) expect(c.safe, `${b.slug}: ${c.path}`).toBe(true);
     }
   }, 30_000);
+
+  it('scenarios healed by another strategy (re-run / AI / owner) get no rule diff', () => {
+    for (const b of built.filter(x => x.entry.resolution)) expect(b.changes.map(c => c.path), b.slug).toEqual([]);
+  });
 
   it('fixtures are valid YAML except where the scenario is a YAML syntax error', () => {
     // (fixed output is parse-checked by the validator in the test above)

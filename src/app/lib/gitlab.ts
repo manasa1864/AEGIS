@@ -143,6 +143,22 @@ export async function fetchRepoFile(
   }
 }
 
+/** Every file path in the repo at `ref` (paginated tree listing) — null when the API refuses. */
+export async function listRepoPaths(pat: string, owner: string, repo: string, ref: string, maxPages = 20): Promise<string[] | null> {
+  const paths: string[] = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const res = await fetch(
+      `${BASE}/projects/${pid(owner, repo)}/repository/tree?recursive=true&per_page=100&page=${page}&ref=${encodeURIComponent(ref)}`,
+      { headers: h(pat) },
+    ).catch(() => null);
+    if (!res?.ok) return page === 1 ? null : paths;
+    const items = await res.json().catch(() => []) as Array<{ path: string; type: string }>;
+    for (const it of items) if (it.type === 'blob') paths.push(it.path);
+    if (items.length < 100) break;
+  }
+  return paths;
+}
+
 // Fetch the tail of a job's trace log. 300 lines matches the GitHub side —
 // GitLab errors often sit above after_script/cleanup output, which 60 lines
 // regularly cut off. chunkLogs() trims this further before it reaches the AI.

@@ -36,6 +36,28 @@ const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 // Confidence threshold below which user approval is required before applying fix
 const APPROVAL_THRESHOLD = 65;
 
+// Logs are read from every failed job (up to MAX_JOB_LOGS) — each job can fail for
+// its own reason, and an unread job is a failure left undiagnosed. The jobs share
+// one character budget so the AI prompt stays bounded however many fail.
+const MAX_JOB_LOGS = 10;
+const LOG_BUDGET = 36_000;
+const perJobLogChars = (jobs: number) => Math.max(2_000, Math.floor(LOG_BUDGET / Math.max(1, Math.min(jobs, MAX_JOB_LOGS))));
+
+/** Each failed job's log in two forms: error-focused (chunked) for diagnosis, the rules and
+ *  the AI prompt, and complete (as bounded by the API) for rules that parse exact tool output —
+ *  whole reports such as npm audit's, and every compiler/linter row. */
+async function readJobLogs(
+  jobs: Array<{ id?: number; name: string }>, fetchLog: (id: number) => Promise<string>,
+): Promise<{ full: string[]; forAi: string[] }> {
+  const picked = jobs.slice(0, MAX_JOB_LOGS);
+  const per = perJobLogChars(jobs.length);
+  const raws = await Promise.all(picked.map(j => (j.id ? fetchLog(j.id).catch(() => '') : Promise.resolve(''))));
+  return {
+    full: picked.map((j, i) => (raws[i] ? `\nJob "${j.name}" logs:\n${raws[i]}` : '')),
+    forAi: picked.map((j, i) => (raws[i] ? `\nJob "${j.name}" logs:\n${chunkLogs(raws[i], per)}` : '')),
+  };
+}
+
 /** Pair a fix with the blob sha of the file it overwrites ('' = new file).
  *  Models often drop the directory ("ci.yml" for ".github/workflows/ci.yml"),
  *  so an unambiguous suffix match adopts the real path. The sha of a
@@ -379,14 +401,10 @@ export function useHealingProcess({
           setActiveNode('fix-engine');
 
           // Logs for all failed jobs — the rules, the flaky check and the AI all need them
-          const allGlJobLogs = await Promise.all(
-            failedJobs.slice(0, 3).map(async j => {
-              if (!j.id) return '';
-              const raw = await getGitlabJobLogs(effectivePat, owner, repoName, j.id).catch(() => '');
-              return `\nJob "${j.name}" logs:\n${chunkLogs(raw)}`;
-            }),
-          );
-          const glLogs = allGlJobLogs.join('\n');
+          const glJobLogs = await readJobLogs(failedJobs, id => getGitlabJobLogs(effectivePat, owner, repoName, id));
+          const allGlJobLogs = glJobLogs.forAi;
+          const glLogs = allGlJobLogs.join('\n');          // error-focused text (see the GitHub flow)
+          const glFullLogs = glJobLogs.full.join('\n');
           const glMultiDiag = categorizeAllErrors(glLogs, failedJobs.map(j => j.name));
           const glDiagnosis = glMultiDiag.primary;
           const glAllCategories = glMultiDiag.all.map(d => d.category);
@@ -401,7 +419,7 @@ export function useHealingProcess({
           }
 
           // Files for ALL matched categories + every source file the logs point at
-          const glContext = await buildGitlabContext(effectivePat, owner, repoName, branch, ciFiles, glMultiDiag.all, glLogs);
+          const glContext = await buildGitlabContext(effectivePat, owner, repoName, branch, ciFiles, glMultiDiag.all, `${glLogs}\n${glFullLogs}`);
           glContextFiles = glContext.allFiles;
           if (glContext.additionalFiles.length > 0) {
             add({ type: 'info', message: `CONTEXT_EXPANDED :: fetched=[${glContext.additionalFiles.map(f => f.path).join(', ')}]`, timestamp: ts() });
@@ -429,7 +447,7 @@ export function useHealingProcess({
           healSignature = errorSignature(glLogs, glAllCategories);
           const glLadder = await runHealingLadder({
             ctx: strategyCtx('gitlab', glRuns, branch), repoKey, signature: healSignature,
-            logs: glLogs, categories: glAllCategories, diagnoses: glMultiDiag.all, files: glContext.allFiles,
+            logs: glLogs, fullLogs: glFullLogs, categories: glAllCategories, diagnoses: glMultiDiag.all, files: glContext.allFiles,
             errorContext, keys: { gemini: geminiKey, groq: groqKey, gcloud: gcloudKey },
             approvalThreshold: APPROVAL_THRESHOLD, requestApproval: approvalGate, onStrategy: markStrategy,
           });
@@ -612,13 +630,9 @@ export function useHealingProcess({
                   if (deepPipeline) {
                     const deepJobs = await getPipelineJobs(effectivePat, owner, repoName, deepPipeline.id);
                     const deepFailedJobs = deepJobs.filter(j => j.status === 'failed');
-                    const deepLogs = await Promise.all(
-                      deepFailedJobs.slice(0, 3).map(async j => {
-                        if (!j.id) return '';
-                        const raw = await getGitlabJobLogs(effectivePat, owner, repoName, j.id).catch(() => '');
-                        return `\nJob "${j.name}" logs:\n${chunkLogs(raw)}`;
-                      }),
-                    );
+                    const deepJobLogs = await readJobLogs(deepFailedJobs, id => getGitlabJobLogs(effectivePat, owner, repoName, id));
+                    const deepLogs = deepJobLogs.forAi;
+                    const deepFullLogs = deepJobLogs.full.join('\n');
                     const deepStepNames = deepFailedJobs.map(j => j.name);
                     const deepDiag = categorizeAllErrors(deepLogs.join('\n'), deepStepNames);
                     const deepCategories = deepDiag.all.map(d => d.category);
@@ -630,10 +644,10 @@ export function useHealingProcess({
 
                     // Fetch current state from fix branch
                     const deepCiFiles = await getGitlabWorkflowFiles(effectivePat, owner, repoName, glFixBranch);
-                    const deepContext = await buildGitlabContext(effectivePat, owner, repoName, glFixBranch, deepCiFiles, deepDiag.all, deepLogs.join('\n'));
+                    const deepContext = await buildGitlabContext(effectivePat, owner, repoName, glFixBranch, deepCiFiles, deepDiag.all, `${deepLogs.join('\n')}\n${deepFullLogs}`);
 
                     let deepGlFixes: Array<{ path: string; content: string; explanation: string }> = [];
-                    const deepRuleFixes = applyRuleBasedFixes(deepCategories, deepLogs.join('\n'), deepContext.allFiles);
+                    const deepRuleFixes = applyRuleBasedFixes(deepCategories, deepLogs.join('\n'), deepContext.allFiles, { reportLogs: deepFullLogs });
                     if (deepRuleFixes.length > 0) {
                       add({ type: 'result', message: `DEEP_FIX :: rule_match=${deepRuleFixes.length} patterns categories=[${deepCategories.slice(0, 3).join(', ')}]`, status: 'success', timestamp: ts() });
                       deepGlFixes = deepRuleFixes;
@@ -823,15 +837,23 @@ export function useHealingProcess({
           add({ type: 'attempt', message: `#2 :: strategy=healing_ladder ai=${aiKey ? aiModel : 'none'}`, timestamp: ts() });
           setActiveNode('fix-engine');
 
-          // Logs across ALL failing workflows (up to 5 jobs) — needed by every strategy
-          const allGhJobLogs = await Promise.all(
-            allFailedJobs.slice(0, 5).map(async j => {
-              if (!j.id) return '';
-              const raw = await getJobLogs(effectivePat, owner, repoName, j.id).catch(() => '');
-              return `\nJob "${j.name}" logs:\n${chunkLogs(raw)}`;
-            }),
-          );
+          // Logs across ALL failing workflows — needed by every strategy
+          const ghJobLogs = await readJobLogs(allFailedJobs, id => getJobLogs(effectivePat, owner, repoName, id));
+          const allGhJobLogs = ghJobLogs.forAi;
+          // A run that failed with no jobs never started: GitHub rejected its workflow file
+          // (bad cron, unknown key…). There is no log — say so, so diagnosis looks at the file.
+          const invalidWorkflows = allFailedRuns.filter((_, i) => allJobsPerRun[i].length === 0);
+          for (const r of invalidWorkflows) {
+            const note = `\nWorkflow "${r.name}" (${r.path ?? 'unknown path'}): the workflow file is invalid — the run failed before any job started`;
+            allGhJobLogs.push(note);
+            ghJobLogs.full.push(note);
+            add({ type: 'info', message: `INVALID_WORKFLOW_FILE :: ${r.path ?? r.name} — failed with no jobs; checking the file itself`, timestamp: ts() });
+          }
+          // Diagnosis and keyword-matched rules read the error-focused text (ghLogs): full logs
+          // also carry setup chatter (submodule sync, deprecation notices) nobody failed on. The
+          // complete logs go to parsers of exact tool output (linter rows, audit reports).
           const ghLogs = allGhJobLogs.join('\n');
+          const ghFullLogs = ghJobLogs.full.join('\n');
           const allFailedStepNames = allFailedJobs.flatMap(j => j.steps.filter(s => s.conclusion === 'failure').map(s => s.name));
           const ghMultiDiag = categorizeAllErrors(ghLogs, allFailedStepNames);
           const ghDiagnosis = ghMultiDiag.primary;
@@ -846,7 +868,7 @@ export function useHealingProcess({
             add({ type: 'info', message: `ROOT_CAUSE_CLUSTER :: ${ghClusters.filter(c => c.categories.length > 1).map(c => `${c.rootCause}=[${c.categories.join('+')}]`).join(' | ')}`, timestamp: ts() });
           }
 
-          const ghContext = await buildGithubContext(effectivePat, owner, repoName, branch, workflowFiles, ghMultiDiag.all, ghLogs);
+          const ghContext = await buildGithubContext(effectivePat, owner, repoName, branch, workflowFiles, ghMultiDiag.all, `${ghLogs}\n${ghFullLogs}`);
           ghContextFiles = ghContext.allFiles;
           if (ghContext.additionalFiles.length > 0) {
             add({ type: 'info', message: `CONTEXT_EXPANDED :: fetched=[${ghContext.additionalFiles.map(f => f.path).join(', ')}]`, timestamp: ts() });
@@ -875,7 +897,7 @@ export function useHealingProcess({
           healSignature = errorSignature(ghLogs, ghAllCategories);
           const ghLadder = await runHealingLadder({
             ctx: strategyCtx('github', ghRuns, branch), repoKey, signature: healSignature,
-            logs: ghLogs, categories: ghAllCategories, diagnoses: ghMultiDiag.all, files: ghContext.allFiles,
+            logs: ghLogs, fullLogs: ghFullLogs, categories: ghAllCategories, diagnoses: ghMultiDiag.all, files: ghContext.allFiles,
             staticFixes: staticFixes.map(f => withTargetSha(f, ghContext.allFiles)),
             errorContext, keys: { gemini: geminiKey, groq: groqKey, gcloud: gcloudKey },
             approvalThreshold: APPROVAL_THRESHOLD, requestApproval: approvalGate, onStrategy: markStrategy,
@@ -987,22 +1009,19 @@ export function useHealingProcess({
                 if (resumeRuns.length > 0) {
                   const resumeJobsPerRun = await Promise.all(resumeRuns.map(r => getRunJobs(effectivePat, owner, repoName, r.id)));
                   const resumeFailedJobs = resumeJobsPerRun.flat().filter(j => j.conclusion === 'failure');
-                  const resumeLogs = await Promise.all(resumeFailedJobs.slice(0, 5).map(async j => {
-                    if (!j.id) return '';
-                    const raw = await getJobLogs(effectivePat, owner, repoName, j.id).catch(() => '');
-                    return `\nJob "${j.name}" logs:\n${chunkLogs(raw)}`;
-                  }));
+                  const resumeJobLogs = await readJobLogs(resumeFailedJobs, id => getJobLogs(effectivePat, owner, repoName, id));
+                  const resumeLogs = resumeJobLogs.forAi;
                   const resumeStepNames = resumeFailedJobs.flatMap(j => j.steps.filter(s => s.conclusion === 'failure').map(s => s.name));
                   const resumeDiag = categorizeAllErrors(resumeLogs.join('\n'), resumeStepNames);
                   add({ type: 'info', message: `RESUME_DIAGNOSIS :: categories=[${resumeDiag.all.map(d => d.category).join(', ')}]`, timestamp: ts() });
                   const resumeWorkflows = await getWorkflowFiles(effectivePat, owner, repoName, existingAegisPR.branch);
-                  const resumeContext = await buildGithubContext(effectivePat, owner, repoName, existingAegisPR.branch, resumeWorkflows, resumeDiag.all, resumeLogs.join('\n'));
+                  const resumeContext = await buildGithubContext(effectivePat, owner, repoName, existingAegisPR.branch, resumeWorkflows, resumeDiag.all, `${resumeLogs.join('\n')}\n${resumeJobLogs.full.join('\n')}`);
                   // Static analysis on the fix branch files
                   const resumeStaticFixes = applyRuleBasedFixes(
                     ['invalid_workflow_syntax', 'yaml_syntax'] as ErrorCategory[],
                     '', resumeWorkflows,
                   );
-                  const resumeRuleFixes = applyRuleBasedFixes(resumeDiag.all.map(d => d.category), resumeLogs.join('\n'), resumeContext.allFiles);
+                  const resumeRuleFixes = applyRuleBasedFixes(resumeDiag.all.map(d => d.category), resumeLogs.join('\n'), resumeContext.allFiles, { reportLogs: resumeJobLogs.full.join('\n') });
                   const allResumeFixes = [...resumeStaticFixes, ...resumeRuleFixes];
                   const uniqueResumeFixes = allResumeFixes.filter((f, i, arr) => arr.findIndex(x => x.path === f.path) === i);
                   // Same safety gate as every other commit path
@@ -1172,13 +1191,9 @@ export function useHealingProcess({
                   if (deepRuns.length > 0) {
                     const deepJobsPerRun = await Promise.all(deepRuns.map(r => getRunJobs(effectivePat, owner, repoName, r.id)));
                     const deepFailedJobs = deepJobsPerRun.flat().filter(j => j.conclusion === 'failure');
-                    const deepLogs = await Promise.all(
-                      deepFailedJobs.slice(0, 5).map(async j => {
-                        if (!j.id) return '';
-                        const raw = await getJobLogs(effectivePat, owner, repoName, j.id).catch(() => '');
-                        return `\nJob "${j.name}" logs:\n${chunkLogs(raw)}`;
-                      }),
-                    );
+                    const deepJobLogs = await readJobLogs(deepFailedJobs, id => getJobLogs(effectivePat, owner, repoName, id));
+                    const deepLogs = deepJobLogs.forAi;
+                    const deepFullLogs = deepJobLogs.full.join('\n');
                     const deepStepNames = deepFailedJobs.flatMap(j =>
                       j.steps.filter(s => s.conclusion === 'failure').map(s => s.name),
                     );
@@ -1191,12 +1206,12 @@ export function useHealingProcess({
 
                     // Fetch current state from the fix branch for accurate context + SHAs
                     const deepWorkflows = await getWorkflowFiles(effectivePat, owner, repoName, fixBranch);
-                    const deepContext = await buildGithubContext(effectivePat, owner, repoName, fixBranch, deepWorkflows, deepDiag.all, deepLogs.join('\n'));
+                    const deepContext = await buildGithubContext(effectivePat, owner, repoName, fixBranch, deepWorkflows, deepDiag.all, `${deepLogs.join('\n')}\n${deepFullLogs}`);
 
                     // Rule-based first, fall back to AI
                     interface DeepFix { path: string; content: string; explanation: string; sha: string }
                     let deepFixes: DeepFix[] = [];
-                    const deepRuleFixes = applyRuleBasedFixes(deepCategories, deepLogs.join('\n'), deepContext.allFiles);
+                    const deepRuleFixes = applyRuleBasedFixes(deepCategories, deepLogs.join('\n'), deepContext.allFiles, { reportLogs: deepFullLogs });
                     if (deepRuleFixes.length > 0) {
                       add({ type: 'result', message: `DEEP_FIX :: rule_match=${deepRuleFixes.length} patterns categories=[${deepCategories.slice(0, 3).join(', ')}]`, status: 'success', timestamp: ts() });
                       deepFixes = deepRuleFixes.map(f => withTargetSha(f, deepContext.allFiles));

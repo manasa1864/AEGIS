@@ -1,0 +1,26 @@
+# Aegis fix catalog #100 — Docker Hub login fails on PRs / forks
+#
+# Tier:       4 · Advanced
+# Category:   docker_auth (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error: Error response from daemon: Get "https://registry-1.docker.io/v2/": unauthorized: incorrect username or password
+#   | Login to Docker Hub failed
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added push-to-main guard to Docker/deploy jobs — credentials only available on push to main, not PRs
+#
+# Apply:      git apply 04-advanced/100-docker_auth.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -16,6 +16,7 @@
+   NODE_ENV: test
+ jobs:
+   build:
++    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+     runs-on: ubuntu-latest
+     timeout-minutes: 15
+     steps:

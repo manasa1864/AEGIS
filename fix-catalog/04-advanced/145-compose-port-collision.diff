@@ -1,0 +1,25 @@
+# Aegis fix catalog #145 — Two compose services publish the same host port
+#
+# Tier:       4 · Advanced
+# Category:   port_conflict (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | Error response from daemon: driver failed programming external connectivity on endpoint app-cache-1: Bind for 0.0.0.0:3000 failed: port is already allocated
+#
+# How it is solved:
+#   MODIFY docker-compose.yml
+#     - Resolved host-port collisions in docker-compose.yml: cache: 3000:6379 → 3001:6379 (host port 3000 is already published by api) — two services cannot bind the same host port
+#     - compose fails with "port is already allocated". The first service keeps the port
+#     - update any client that used the moved one
+#
+# Apply:      git apply 04-advanced/145-compose-port-collision.diff
+diff --git a/docker-compose.yml b/docker-compose.yml
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -6,4 +6,4 @@
+   cache:
+     image: redis:7
+     ports:
+-      - "3000:6379"
++      - "3001:6379"

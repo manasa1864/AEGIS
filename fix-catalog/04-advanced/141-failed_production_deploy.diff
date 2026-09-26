@@ -1,0 +1,12 @@
+# Aegis fix catalog #141 — Production deploy with no gate or guard
+#
+# Tier:       4 · Advanced
+# Category:   failed_production_deploy (auto-diagnosed from the log below)
+# Engine:     revert to the last green build (validated on CI)
+#
+# CI log:
+#   | production deploy failed: release v2.3.0 crashed on boot
+#   | Error: deploy to production error — rollout aborted
+#
+# How it is solved:
+#   The release crashed on boot, so the last green commit is the safe state. The ladder validates candidate reverts on CI in parallel and opens a PR for the first one that goes green.

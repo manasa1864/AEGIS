@@ -1,0 +1,45 @@
+# Aegis fix catalog #098 — npm audit gate fails on vulnerable direct dependencies
+#
+# Tier:       3 · Intermediate
+# Category:   dependency_vulnerability (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | # npm audit report
+#   | 
+#   | body-parser  <1.20.3
+#   | Severity: high
+#   | body-parser vulnerable to denial of service when url encoding is enabled - https://github.com/advisories/GHSA-qwcr-r2fm-qrc7
+#   | fix available via `npm audit fix`
+#   | node_modules/body-parser
+#   | 
+#   | jsonwebtoken  <=8.5.1
+#   | Severity: high
+#   | jsonwebtoken unrestricted key type could lead to legacy keys usage - https://github.com/advisories/GHSA-8cf7-32gw-wr33
+#   | fix available via `npm audit fix --force`
+#   | Will install jsonwebtoken@9.0.2, which is a breaking change
+#   | node_modules/jsonwebtoken
+#   | 
+#   | 2 high severity vulnerabilities
+#
+# How it is solved:
+#   MODIFY package.json
+#     - Upgraded dependencies with published security advisories: jsonwebtoken 8.5.0 → ^9.0.2 (major upgrade), body-parser 1.18.3 → ^1.20.3 — the audit gate fails while a direct dependency is in a vulnerable range
+#     - each moves to the first patched release. A major upgrade may need code changes — review before merging. Regenerate the lockfile so transitive fixes apply
+#
+# Apply:      git apply 03-intermediate/098-npm-audit-vulnerable.diff
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -11,9 +11,9 @@
+     "lint": "eslint ."
+   },
+   "dependencies": {
+-    "body-parser": "1.18.3",
++    "body-parser": "^1.20.3",
+     "express": "^4.19.2",
+-    "jsonwebtoken": "8.5.0"
++    "jsonwebtoken": "^9.0.2"
+   },
+   "devDependencies": {
+     "typescript": "^5.4.0",

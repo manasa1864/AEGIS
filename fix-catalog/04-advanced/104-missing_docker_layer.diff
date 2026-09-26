@@ -1,0 +1,32 @@
+# Aegis fix catalog #104 — Docker builds never reuse cached layers
+#
+# Tier:       4 · Advanced
+# Category:   missing_docker_layer (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | #5 importing cache manifest from ghcr.io/acme/app:buildcache
+#   | #5 ERROR: layer not found in cache — cache miss on every layer
+#
+# How it is solved:
+#   MODIFY .github/workflows/ci.yml
+#     - Added cache-from/cache-to GitHub Actions cache to docker/build-push-action — missing layers are re-pulled every build without layer caching
+#     - Added docker/setup-buildx-action — docker/build-push-action requires the Buildx builder
+#     - without it cache-from, multi-platform, and advanced build options are unavailable
+#
+# Apply:      git apply 04-advanced/104-missing_docker_layer.diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -25,7 +25,11 @@
+           node-version: 20
+           cache: npm
+       - run: npm ci
++      - name: Set up Docker Buildx
++        uses: docker/setup-buildx-action@v3
+       - uses: docker/build-push-action@v5
+         with:
+           push: false
++          cache-from: type=gha
++          cache-to: type=gha,mode=max
+           tags: app:ci

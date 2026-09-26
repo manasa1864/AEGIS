@@ -1,0 +1,30 @@
+# Aegis fix catalog #062 — Vite build fails resolving the `@` alias
+#
+# Tier:       3 · Intermediate
+# Category:   vite_build_failure (auto-diagnosed from the log below)
+# Engine:     deterministic rule engine — no AI involved
+#
+# CI log:
+#   | [vite]: Rollup failed to resolve import "@/components/Button" from "src/App.tsx".
+#   | error during build:
+#   | vite build failed
+#   | Could not resolve "@/components/Button" (vite)
+#
+# How it is solved:
+#   MODIFY package.json
+#     - Added "@/components" to devDependencies — bundler resolution failed because the package was not installed
+#     - pin to a specific version after adding
+#
+# Apply:      git apply 03-intermediate/062-vite_build_failure.diff
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -15,6 +15,7 @@
+   },
+   "devDependencies": {
+     "typescript": "^5.4.0",
+-    "vitest": "^1.6.0"
++    "vitest": "^1.6.0",
++    "@/components": "latest"
+   }
+ }
