@@ -15,22 +15,9 @@ const TABS: { id: View; label: string }[] = [
   { id: 'healing',      label: 'HEALING' },
   { id: 'history',      label: 'HISTORY' },
   { id: 'intelligence', label: 'INTELLIGENCE' },
-  { id: 'cicd',         label: 'CI/CD' },
-  { id: 'issues',       label: 'ISSUES' },
-  { id: 'prs',          label: 'PULL_REQUESTS' },
-  { id: 'branches',     label: 'BRANCHES' },
-  { id: 'releases',     label: 'RELEASES' },
-  { id: 'security',     label: 'SECURITY' },
-  { id: 'insights',     label: 'INSIGHTS' },
-  { id: 'push',         label: 'PUSH' },
 ];
 
 export function TopBar({ systemStatus, view, onViewChange, anyPatSet, onOpenSettings, onLogout }: TopBarProps) {
-  const statusColor = systemStatus === 'healing' ? '#D4A574'
-    : systemStatus === 'stopped' ? '#A06A6A'
-    : systemStatus === 'healthy' ? '#6A9A7A'
-    : '#CAAA98';
-
   return (
     <div className="relative z-10 border-b border-[#CAAA98]/20 bg-[#0a0e1a]/70 backdrop-blur-sm flex-shrink-0">
       <div className="flex items-center justify-between px-6 py-4">
@@ -71,24 +58,8 @@ export function TopBar({ systemStatus, view, onViewChange, anyPatSet, onOpenSett
           ))}
         </div>
 
-        {/* System status badge + settings + logout */}
+        {/* Settings + logout */}
         <div className="flex items-center gap-2 flex-shrink-0">
-          <motion.div
-            className="px-3 py-1.5 border font-mono text-[10px] tracking-widest flex items-center gap-2"
-            style={{ borderColor: statusColor, color: statusColor }}
-            animate={{ boxShadow: systemStatus === 'healing' ? ['0 0 10px rgba(212,165,116,0.3)', '0 0 20px rgba(212,165,116,0.6)', '0 0 10px rgba(212,165,116,0.3)'] : 'none' }}
-            transition={{ duration: 2, repeat: systemStatus === 'healing' ? Infinity : 0 }}
-          >
-            <motion.div className="w-1.5 h-1.5" style={{ backgroundColor: statusColor }}
-              animate={{ opacity: systemStatus === 'healing' ? [0.5, 1, 0.5] : 1 }}
-              transition={{ duration: 1, repeat: systemStatus === 'healing' ? Infinity : 0 }}
-            />
-            {systemStatus === 'healing' && '[ HEALING ]'}
-            {systemStatus === 'stopped' && '[ HALTED ]'}
-            {systemStatus === 'healthy' && '[ HEALTHY ]'}
-            {systemStatus === 'idle'    && '[ STANDBY ]'}
-          </motion.div>
-
           <button onClick={onOpenSettings}
             className="relative p-2 border border-[#9A8678]/30 hover:border-[#CAAA98]/50 transition-colors group"
             title="ACCESS_CONFIGURATION"

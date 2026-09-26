@@ -1,8 +1,7 @@
 export type SystemStatus = 'idle' | 'healing' | 'stopped' | 'healthy';
 
 export type View =
-  | 'healing' | 'history' | 'intelligence'
-  | 'cicd' | 'issues' | 'prs' | 'branches' | 'releases' | 'security' | 'insights' | 'push';
+  | 'healing' | 'history' | 'intelligence';
 
 export interface Project {
   id: string;
@@ -58,28 +57,6 @@ export interface MetricsData {
   recent: HealingEventRecord[];
 }
 
-export interface SelectedFile {
-  file: File;
-  relativePath: string;
-}
-
-export interface PushLogEntry {
-  id: string;
-  type: 'info' | 'success' | 'error';
-  message: string;
-}
-
-export interface CIRun {
-  id: number;
-  name: string;
-  status: string;
-  conclusion: string | null;
-  branch: string;
-  commitMsg: string;
-  url: string;
-  createdAt: string;
-}
-
 export interface CIPipeline {
   id: number;
   status: string;
@@ -97,47 +74,4 @@ export interface Issue {
   createdAt: string;
   labels: string[];
   author: string;
-}
-
-export interface PullRequest {
-  id: number;
-  number: number;
-  title: string;
-  state: 'open' | 'closed' | 'merged';
-  url: string;
-  sourceBranch: string;
-  targetBranch: string;
-  createdAt: string;
-  author: string;
-  draft: boolean;
-}
-
-export interface Branch {
-  name: string;
-  protected: boolean;
-  isDefault: boolean;
-  lastCommitSha: string;
-  lastCommitDate?: string;
-  lastCommitAuthor?: string;
-  lastCommitMessage?: string;
-}
-
-export interface Release {
-  id: number;
-  tag: string;
-  name: string;
-  body: string;
-  draft: boolean;
-  prerelease: boolean;
-  url: string;
-  createdAt: string;
-}
-
-export interface SecurityAlert {
-  id: number;
-  severity: string;
-  description: string;
-  package?: string;
-  url: string;
-  type: 'dependabot' | 'secret' | 'code';
 }

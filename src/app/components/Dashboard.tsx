@@ -12,14 +12,6 @@ import { IntelligenceStream } from './IntelligenceStream';
 // Secondary views are code-split: they load the first time their tab is opened.
 const HistoryView = lazy(() => import('./HistoryView').then(m => ({ default: m.HistoryView })));
 const IntelligenceView = lazy(() => import('./IntelligenceView').then(m => ({ default: m.IntelligenceView })));
-const CICDPage = lazy(() => import('./CICDPage').then(m => ({ default: m.CICDPage })));
-const IssuesPage = lazy(() => import('./IssuesPage').then(m => ({ default: m.IssuesPage })));
-const PullRequestsPage = lazy(() => import('./PullRequestsPage').then(m => ({ default: m.PullRequestsPage })));
-const BranchesPage = lazy(() => import('./BranchesPage').then(m => ({ default: m.BranchesPage })));
-const ReleasesPage = lazy(() => import('./ReleasesPage').then(m => ({ default: m.ReleasesPage })));
-const SecurityPage = lazy(() => import('./SecurityPage').then(m => ({ default: m.SecurityPage })));
-const InsightsPage = lazy(() => import('./InsightsPage').then(m => ({ default: m.InsightsPage })));
-const PushPage = lazy(() => import('./PushPage').then(m => ({ default: m.PushPage })));
 import { useHealingProcess } from '../hooks/useHealingProcess';
 import { Project, View, MetricsData } from '../types';
 import { getRepo, getComprehensiveCI, isFailedConclusion } from '../lib/github';
@@ -191,7 +183,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
   // Set once the healing hook exists (below); scanCIStatus calls it on a new failure.
   const autoHealRef = useRef<((projectId: string) => void) | null>(null);
 
-  const [view, setView] = useState<View>(() => (sessionStorage.getItem('aegis_view') as View) || 'healing');
+  const [view, setView] = useState<View>(() => {
+    const saved = sessionStorage.getItem('aegis_view');
+    return saved === 'history' || saved === 'intelligence' ? saved : 'healing';
+  });
   // loadMetrics is declared below — safe to reference here because handleViewChange
   // is only ever called on user click, never during the render phase (no TDZ risk).
   const handleViewChange = (v: View) => {
@@ -484,12 +479,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   const selectedProjectData = projects.find(p => p.id === selectedProject);
 
-  // Props shared by the per-repository pages (CI/CD, Issues, PRs, Branches, Releases, Security, Insights)
-  const pageProps = {
-    projects, selectedProject, onSelectProject: selectProject, onClearProject: unselectProject,
-    githubPat, gitlabPat, onAddRepo: (url: string) => handleAddRepo(url),
-  };
-
   // Auto-heal: a repo that just turned red starts healing (never interrupts a running heal).
   useEffect(() => {
     autoHealRef.current = autoHeal
@@ -590,14 +579,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
             <IntelligenceView metrics={metrics} loading={metricsLoading} />
           )}
 
-          {view === 'cicd' && <CICDPage {...pageProps} geminiKey={geminiKey} groqKey={groqKey} />}
-          {view === 'issues' && <IssuesPage {...pageProps} geminiKey={geminiKey} groqKey={groqKey} />}
-          {view === 'prs' && <PullRequestsPage {...pageProps} geminiKey={geminiKey} groqKey={groqKey} />}
-          {view === 'insights' && <InsightsPage {...pageProps} geminiKey={geminiKey} groqKey={groqKey} />}
-          {view === 'branches' && <BranchesPage {...pageProps} />}
-          {view === 'releases' && <ReleasesPage {...pageProps} />}
-          {view === 'security' && <SecurityPage {...pageProps} />}
-          {view === 'push' && <div className="flex-1 overflow-y-auto custom-scrollbar"><PushPage githubPat={githubPat} /></div>}
         </Suspense>
 
       </div>

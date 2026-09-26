@@ -64,22 +64,4 @@ describe('healing strategies + new views', () => {
     }));
     for (const text of ['GCLOUD_KEY', 'GITLAB_HOST', 'gitlab.acme.io', 'AUTO_HEAL']) expect(html, text).toContain(text);
   });
-
-  it('every page reachable from the new tabs renders', async () => {
-    const pages = await Promise.all([
-      import('../src/app/components/CICDPage'), import('../src/app/components/IssuesPage'),
-      import('../src/app/components/PullRequestsPage'), import('../src/app/components/BranchesPage'),
-      import('../src/app/components/ReleasesPage'), import('../src/app/components/SecurityPage'),
-      import('../src/app/components/InsightsPage'), import('../src/app/components/PushPage'),
-    ]);
-    const props = {
-      projects: [{ id: '1', name: 'app', errorType: 'CI_HEALTHY', repo: 'main', severity: 'low' as const, owner: 'o', repoName: 'app', platform: 'github' as const }],
-      selectedProject: '1', onSelectProject: () => {}, onClearProject: () => {},
-      githubPat: 'x', gitlabPat: '', geminiKey: '', groqKey: '', onAddRepo: async () => {},
-    };
-    for (const mod of pages) {
-      const Page = Object.values(mod).find(v => typeof v === 'function') as (p: typeof props) => JSX.Element;
-      expect(() => renderToString(createElement(Page, props)), Page.name).not.toThrow();
-    }
-  });
 });
