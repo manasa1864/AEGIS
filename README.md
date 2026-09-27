@@ -1,6 +1,8 @@
 # AEGIS — Autonomous CI/CD Healing Dashboard
 
-AEGIS monitors your GitHub Actions and GitLab CI pipelines, diagnoses failures the moment they happen, generates workflow fixes, and opens a pull request — all without you touching anything. It classifies 116 distinct error categories, runs 950+ deterministic rule-based fixer functions before falling back to AI, and verifies the fix by polling CI on the new branch before declaring success.
+AEGIS monitors your GitHub Actions and GitLab CI pipelines, diagnoses failures the moment they happen, fixes the CI config **and the code in the repo**, and opens a pull request — without you touching anything. It classifies 116 error categories, tries ~1,000 deterministic rules and non-AI strategies before falling back to AI, and verifies the fix by polling CI on the new branch before declaring success.
+
+Every fix PR is **repair-only**: it contains the changes that fix the failure and nothing else — no bundled "best-practice" edits, and never an edit that makes CI green by switching a check off.
 
 ---
 
@@ -13,11 +15,14 @@ Push to repo
 AEGIS detects failed workflow run(s)
     │
     ▼
-Fetch all failing workflow files + job logs
-+ every source file the logs point at (stack frames, compiler/linter file:line)
+Fetch the logs of every failed job (up to 10) + all failing workflow files
+    │   (a run that failed with no jobs = GitHub rejected the workflow file itself)
+    ▼
+List the repo tree once → fetch every file the logs point at, wherever it lives
+(paths relative to a job's working-directory, manifests of every job, moved modules)
     │
     ▼
-Static YAML analysis (no logs needed — catches syntax bugs immediately)
+Static checks (no logs needed — only definitions that are invalid on their own)
     │
     ▼
 Log-based error classification → 116 categories, ranked by confidence
@@ -33,6 +38,9 @@ Healing ladder — each strategy is a backup for the one before it:
     │
     ▼
 Merge static fixes + AI/rule fixes (deduped by file path)
+    │
+    ▼
+Repair-only guard — drop optional hardening and any edit that only silences a check
     │
     ▼
 Safety validation — block destructive or malformed fixes (incl. any fix that breaks YAML parsing)
@@ -60,13 +68,15 @@ Record MTTR, save failure embedding for future similarity matching
 | Google Vertex AI | gemini-flash-latest (grounded) | Grounded analysis with live search |
 | Google Gemini | gemini-flash-latest | Fallback AI + postmortem generation |
 
-The system tries Groq first, then Vertex AI, then Gemini. All three are optional — if none are configured, only rule-based fixes run.
+AI is step 5 of the healing ladder: grounded Vertex AI first, then Groq, then Gemini. All three are optional — without any key, every non-AI strategy (known fixes, rules, flaky re-run, the repo's own auto-fixers, revert) still runs.
 
 ---
 
 ## Error Categories — What AEGIS Can Detect and Fix
 
-### Simple (always run, no logs needed)
+**Fix column:** ✅ rule-based fix · 🔁 re-run first (transient — no code change) · ↩️ revert to the last green build · 🤖 AI step (needs judgement; rules still fix the specific errors they recognise) · 👤 needs the repo owner (credentials or tokens only they can create)
+
+### Simple
 
 | Category | Description | Auto-Fix |
 |---|---|---|
@@ -91,7 +101,7 @@ The system tries Groq first, then Vertex AI, then Gemini. All three are optional
 | `memory_error` | OOM, heap overflow, segfault | ✅ Rule-based |
 | `permission_denied` | Script not executable, EACCES | ✅ Rule-based |
 | `permissions_error` | GitHub token missing required scope (403) | ✅ Rule-based |
-| `concurrency_issue` | Run cancelled by concurrency group | ✅ Rule-based |
+| `concurrency_issue` | Run cancelled by concurrency group | 🔁 Re-run — a newer run superseded it; nothing is broken |
 | `job_timeout` | Job exceeded runner time limit | ✅ Rule-based |
 | `husky_hook_failure` | Husky pre-commit hooks failing in CI | ✅ Rule-based |
 | `vite_build_failure` | Vite chunk size / env mode / config error | ✅ Rule-based |
@@ -119,7 +129,7 @@ The system tries Groq first, then Vertex AI, then Gemini. All three are optional
 | `artifact_retention` | Artifact storage / retention issue | ✅ Rule-based |
 | `cache_failure` | Cache restore / save failure | ✅ Rule-based |
 | `cache_restore_failure` | Cache restore step failed | ✅ Rule-based |
-| `coverage_failure` | Coverage threshold not met | ✅ Rule-based |
+| `coverage_failure` | Coverage threshold not met | 🤖 AI — writes tests; thresholds are never lowered |
 | `snapshot_mismatch` | Jest / Vitest snapshot mismatch | ✅ Rule-based |
 | `runner_unavailable` | Runner offline or label typo | ✅ Rule-based |
 | `e2e_failure` | Playwright / Cypress browser setup failure | ✅ Rule-based |
@@ -127,7 +137,7 @@ The system tries Groq first, then Vertex AI, then Gemini. All three are optional
 | `pipeline_stage_failure` | Pipeline stage orchestration failure | ✅ Rule-based |
 | `stage_order_error` | Job stage dependency ordering error | ✅ Rule-based |
 | `invalid_trigger` | Invalid pipeline trigger or event filter | ✅ Rule-based |
-| `parallel_sync_issue` | Parallel job synchronization failure | ✅ Rule-based |
+| `parallel_sync_issue` | Parallel job synchronization failure | 🤖 AI |
 | `null_reference` | Null pointer / undefined reference | ✅ Rule-based |
 | `type_mismatch` | Type cast or type assertion error | ✅ Rule-based |
 | `infinite_loop` | Process hung / infinite loop | ✅ Rule-based |
@@ -145,31 +155,31 @@ The system tries Groq first, then Vertex AI, then Gemini. All three are optional
 | Category | Description | Auto-Fix |
 |---|---|---|
 | `docker_auth` | Docker Hub login / credentials not configured | ✅ Rule-based |
-| `docker_build` | Dockerfile / image build failure | ✅ Rule-based |
-| `docker_rate_limit` | Docker Hub pull rate limit (429) | ✅ Rule-based |
+| `docker_build` | Dockerfile / image build failure | ✅ Rule-based for specific errors (Dockerfile path, unknown / misspelled instructions) · 🤖 AI otherwise |
+| `docker_rate_limit` | Docker Hub pull rate limit (429) | 🔁 Re-run · authenticate pulls if it persists |
 | `dockerfile_syntax` | Dockerfile instruction / syntax error | ✅ Rule-based |
 | `missing_docker_layer` | Docker build layer missing from cache | ✅ Rule-based |
 | `container_startup` | Container failed to start | ✅ Rule-based |
 | `container_health_failure` | Container health check fails | ✅ Rule-based |
 | `registry_auth_failure` | Registry push/pull auth failure (GHCR, ECR, GCR, ACR) | ✅ Rule-based |
 | `volume_mount_failure` | Docker volume mount failure | ✅ Rule-based |
-| `image_pull_failure` | Docker image pull denied / not found | ✅ Rule-based |
+| `image_pull_failure` | Docker image pull denied / not found | 🔁 Re-run · then 🤖 AI / 👤 owner (image name or credentials) |
 | `oidc_failure` | OIDC/Federated auth for AWS, GCP, Azure | ✅ Rule-based |
-| `invalid_token` | Expired / invalid API token (401) | ✅ Rule-based |
+| `invalid_token` | Expired / invalid API token (401) | 👤 Owner — re-issue the token secret |
 | `ssh_key_error` | SSH key authentication failure | ✅ Rule-based |
 | `oauth_failure` | OAuth token invalid / expired | ✅ Rule-based |
 | `secret_access_denied` | Vault / secret manager access denied | ✅ Rule-based |
 | `insufficient_role` | IAM / RBAC role lacks required permissions | ✅ Rule-based |
 | `cross_project_access` | Cross-project / cross-org resource access denied | ✅ Rule-based |
-| `aws_auth_failure` | AWS credential / IAM role assumption failure | ✅ Rule-based |
-| `gcp_auth_failure` | GCP service account / workload identity failure | ✅ Rule-based |
-| `deploy_failure` | Production deployment failure | ✅ Rule-based |
+| `aws_auth_failure` | AWS credential / IAM role assumption failure | 👤 Owner — OIDC role or access-key secrets |
+| `gcp_auth_failure` | GCP service account / workload identity failure | 👤 Owner — Workload Identity or service-account key |
+| `deploy_failure` | Production deployment failure | ✅ Rule-based for manifest errors (selector/labels, revision history) · 🤖 AI otherwise |
 | `rollback_failure` | Deployment rollback failed | ✅ Rule-based |
-| `failed_production_deploy` | Production deployment permanently failed | ✅ Rule-based |
+| `failed_production_deploy` | Production deployment permanently failed | ↩️ Revert to last green |
 | `blue_green_conflict` | Blue-green traffic switch conflict | ✅ Rule-based |
-| `canary_mismatch` | Canary deployment version mismatch | ✅ Rule-based |
+| `canary_mismatch` | Canary deployment version mismatch | ↩️ Revert to last green |
 | `service_unavailable` | Upstream service 503 / 502 | ✅ Rule-based |
-| `load_balancer_issue` | ALB/ELB/nginx health check failing | ✅ Rule-based |
+| `load_balancer_issue` | ALB/ELB/nginx health check failing | 🤖 AI |
 | `health_check_failure` | Service or container health check failure | ✅ Rule-based |
 | `port_conflict` | Port already bound / EADDRINUSE | ✅ Rule-based |
 | `api_rate_limit` | API rate limiting (429) | ✅ Rule-based |
@@ -178,7 +188,7 @@ The system tries Groq first, then Vertex AI, then Gemini. All three are optional
 | `invalid_api_response` | API returns unexpected HTTP status | ✅ Rule-based |
 | `rest_endpoint_mismatch` | REST endpoint URL / method mismatch | ✅ Rule-based |
 | `third_party_failure` | External integration outage (Snyk, Datadog…) | ✅ Rule-based |
-| `schema_validation` | JSON/OpenAPI schema validation error | ✅ Rule-based |
+| `schema_validation` | JSON/OpenAPI schema validation error | 🤖 AI — the spec itself is fixed; the gate is never switched off |
 | `graphql_failure` | GraphQL query / introspection error | ✅ Rule-based |
 | `terraform_failure` | Terraform init / plan / apply failure | ✅ Rule-based |
 | `matrix_failure` | Matrix strategy job failure | ✅ Rule-based |
@@ -186,7 +196,7 @@ The system tries Groq first, then Vertex AI, then Gemini. All three are optional
 | `rust_build_failure` | Rust/Cargo compilation or dependency failure | ✅ Rule-based |
 | `dotnet_build_failure` | .NET restore / build / publish failure | ✅ Rule-based |
 | `gradle_build_failure` | Gradle build or dependency resolution failure | ✅ Rule-based |
-| `maven_build_failure` | Maven build or dependency resolution failure | ✅ Rule-based |
+| `maven_build_failure` | Maven build or dependency resolution failure | 🤖 AI (dependency coordinates / repository auth) |
 | `runtime_version_error` | Node/Python/Java runtime version mismatch | ✅ Rule-based |
 | `db_connection_error` | Database connection refused (ECONNREFUSED) | ✅ Rule-based |
 | `db_migration_error` | Database migration failure | ✅ Rule-based |
@@ -207,14 +217,18 @@ The system tries Groq first, then Vertex AI, then Gemini. All three are optional
 | GitHub Actions integration | ✅ Working | Detects all failing workflows per push |
 | GitLab CI integration | ✅ Working | Full pipeline + job log support |
 | Static YAML analysis | ✅ Working | Runs before log-based diagnosis; catches bugs with no log output |
-| Rule-based auto-fix (950+ fixer functions) | ✅ Working | Deterministic; no AI key required |
+| Rule-based auto-fix (~1,000 fixer functions) | ✅ Working | Deterministic; no AI key required |
+| Repair-only fix PRs | ✅ Working | Optional hardening (caching, probes, env niceties) is never mixed into a heal; edits that silence a check (`continue-on-error`, `\|\| true`, lowered coverage…) are rejected |
+| Monorepo / subdirectory projects | ✅ Working | Repo tree resolves paths relative to each job's `working-directory`; manifest fixes edit the manifest of the failing job |
+| Every failed job diagnosed | ✅ Working | Up to 10 failed jobs per heal (was 5); runs rejected before any job started are recognised as invalid workflow files |
+| Dependency security gates | ✅ Working | `npm audit` / `pip-audit` failures → vulnerable direct dependencies upgraded to their first patched release |
 | Groq AI analysis | ✅ Working | JSON parser fixed (balanced-bracket extraction) |
 | Gemini AI analysis | ✅ Working | Used as fallback + postmortem generation |
 | Vertex AI grounded analysis | ✅ Working | Uses Google Search grounding |
 | Static fixes merged into commit | ✅ Fixed | Were previously computed but orphaned; now correctly merged after AI path |
 | Multi-workflow failure detection | ✅ Working | Fixes all failing workflows in one PR |
 | Automatic branch + PR creation | ✅ Working | Branch named `aegis/fix-<timestamp>` |
-| CI verification polling | ✅ Working | Polls fix branch up to 60s; triggers deep diagnosis if still red |
+| CI verification polling | ✅ Working | Polls the fix branch; triggers the deep second pass if still red, then escalates to revert |
 | Deep second-pass diagnosis | ✅ Working | Re-fetches logs from fix branch; runs full fixer pipeline again |
 | Iterative healing | ✅ Working | Resumes from existing open aegis PRs instead of re-branching |
 | Confidence threshold + approval | ✅ Working | Pauses at < 65% confidence and shows operator modal |
@@ -231,7 +245,7 @@ The system tries Groq first, then Vertex AI, then Gemini. All three are optional
 | Non-AI healing strategies | ✅ Working | Known-fix replay, compiler suggestions, exact versions, flaky rerun, the repo's own auto-fixers in CI, revert-to-last-green |
 | Slack / Teams notifications | ❌ Not implemented | No outbound notification channel |
 | Live healing view + per-file diffs | ✅ Working | Phase stepper, diagnosed causes, each fix's diff and commit status, PR + CI verdict update live |
-| Code-level fixes | ✅ Working | Surgical edits at the logged file:line (unused imports, prefer-const, debugger, `.only`, TS2578, null deref, missing packages) |
+| Code-level fixes | ✅ Working | Surgical edits at the logged file:line — unused imports, prefer-const, ESLint `eqeqeq`/`use-isnan`/`no-var`/`no-console`/unused locals, ruff `E711`/`E722`/`F541`/`B006`, missing TS exports, moved Python modules, `yaml.load`, off-by-one loops, compiler "did you mean", debugger, `.only`, TS2578, null deref, missing packages |
 | Fix catalog | ✅ Working | `fix-catalog/` — 146 scenarios across 116 categories, simple → complex; every diff is real engine output |
 | GitLab MCP tool calls | ⚠️ Partial | MCP bridge server (`server.js`) exists but tool coverage is limited |
 | `unknown` category auto-fix | ⚠️ AI only | No rule-based fixer; depends entirely on Groq / Gemini output |
@@ -242,8 +256,8 @@ The system tries Groq first, then Vertex AI, then Gemini. All three are optional
 
 | Tool | Version | Required for |
 |---|---|---|
-| Node.js | 18 or 20 | Frontend + MCP bridge server |
-| pnpm | 8+ | Package management |
+| Node.js | 20+ (CI uses 22) | Frontend + MCP bridge server |
+| pnpm | 11 (pinned in `packageManager`; `corepack enable` picks it up) | Package management |
 | Python | 3.10+ | Flask backend |
 | PostgreSQL | 14+ | Backend database (or use Render / Supabase) |
 
@@ -317,10 +331,26 @@ python run.py
 
 **Terminal 3 — MCP bridge for GitLab (port 3001, optional)**
 ```bash
-node server.js
+pnpm dev:server
 ```
 
-Open `http://localhost:5173` in your browser.
+(`pnpm dev:full` starts the Vite server and the MCP bridge together.) Open `http://localhost:5173` in your browser.
+
+---
+
+## Using the Dashboard
+
+The dashboard does one thing — heal CI — and has three tabs:
+
+| Tab | What it shows |
+|---|---|
+| **HEALING** | Your repositories and their CI health. Select one and start a heal; the live healing view (below) shows every step. |
+| **HISTORY** | Every past heal — root cause, the fix steps applied, alternatives considered, and the generated postmortem report. |
+| **INTELLIGENCE** | Totals across heals — success rate, mean time to recover, average AI confidence, outcomes by severity and by provider, recent events. |
+
+Issues, pull requests, branches, releases and security alerts are left to GitHub/GitLab themselves.
+
+**Settings** (gear icon) holds the GitHub / GitLab tokens, a self-hosted **GITLAB_HOST**, the Groq / Gemini / Google Cloud AI keys, and **AUTO_HEAL** — when on, any repository whose CI turns red while the dashboard is open starts healing on its own (checked every 30 s). Keys stay in the browser session; in development they are pre-filled from `.env`.
 
 ---
 
@@ -329,26 +359,32 @@ Open `http://localhost:5173` in your browser.
 ```
 aegis/
 ├── src/app/
-│   ├── components/          # React UI components
+│   ├── components/          # Dashboard (Healing / History / Intelligence), live healing view, settings
 │   ├── hooks/
-│   │   └── useHealingProcess.ts   # Core healing orchestrator
+│   │   └── useHealingProcess.ts   # Core healing orchestrator (GitHub + GitLab flows)
 │   └── lib/
 │       ├── diagnostics.ts         # 116-category error classifier
-│       ├── ruleBasedFixer.ts      # Fixer orchestrator (950+ rules)
+│       ├── ruleBasedFixer.ts      # Fixer orchestrator (~1,000 rules) + repair-only policy + masking guard
+│       ├── healEngine.ts          # Lazy-loaded entry point for the heavy engine
+│       ├── healingRun.ts          # Live healing state (pure reducer) behind the UI
+│       ├── strategies/            # Healing ladder: known fixes, flaky re-run, auto-fixer CI job, revert, versions
 │       ├── fixers/
 │       │   ├── simple/            # Syntax, env vars, deps, build
 │       │   ├── intermediate/      # Git, pipeline, config, runtime, testing
-│       │   └── advanced/          # Auth, Docker, deployment, API, database
+│       │   ├── advanced/          # Auth, Docker, deployment, API, database, infra manifests
+│       │   ├── code/              # Source-code fixers (file:line) + dependency-manifest repairs
+│       │   └── workflowJobs.ts    # Jobs, working directories and runtime versions of a workflow
 │       ├── groq.ts                # Groq / llama-3.3-70b integration
 │       ├── gemini.ts              # Google Gemini integration
 │       ├── vertexai.ts            # Vertex AI grounded analysis
 │       ├── github.ts              # GitHub REST API client
 │       ├── gitlab.ts              # GitLab REST API client
-│       ├── contextBuilder.ts      # Fetches relevant extra files per error category
+│       ├── contextBuilder.ts      # Lists the repo tree and fetches the files the failure involves
 │       ├── fixValidator.ts        # Safety validation before committing
 │       ├── jsonExtract.ts         # String-aware JSON extraction from LLM output
 │       ├── base64.ts              # UTF-8-safe base64 for GitHub/GitLab contents API
 │       ├── sanitize.ts            # Prompt-injection filtering + log chunking
+│       ├── yamlCheck.ts           # YAML parse guard for every rule edit
 │       └── failureMemory.ts       # Embedding-based past-failure similarity
 ├── backend/
 │   ├── app/
@@ -356,7 +392,9 @@ aegis/
 │   │   └── routes/           # Flask REST API (/api/metrics, /api/events)
 │   ├── requirements.txt
 │   └── run.py
-├── tests/                    # Vitest suite (validator, sanitizer, healing smoke tests)
+├── tests/                    # Vitest suite (validator, rules, strategies, catalog, UI)
+├── fix-catalog/              # One real engine diff per failure scenario (pnpm catalog)
+├── scripts/fix-catalog/      # Catalog fixtures + generator
 ├── server.js                 # MCP bridge server (GitLab MCP → REST)
 ├── vite.config.ts            # Proxies /api/groq and /api/gemini to avoid CORS
 └── .github/
@@ -493,6 +531,9 @@ What is covered:
 - **Category coverage** — every declared error category (except the intentional `unknown` AI-only fallback) is asserted to have a diagnosis pattern and a crash-free fixer path, so the README table can never silently drift from the code again.
 - **Fix catalog** — every scenario in `fix-catalog/` still produces a validated fix, every diagnosable category has a scenario, and the committed diffs match current engine output.
 - **Code-level fixers, YAML safety, diffs, live UI** — exact-output tests for the source-code fixers; YAML composition safety; unified-diff format (incl. `\ No newline at end of file`); the healing-run state machine; and a server-side render of the live progress panel and graph.
+- **Repair-only healing** (`repairs.test.ts`) — a healthy repo gets no changes; masking edits are rejected; job/working-directory parsing; manifest, lint, infra and code repairs including their edge cases (no side-effecting deletes, no guessing between several packages); repo-tree context resolution; diagnosis false positives.
+- **Healing ladder** (`strategies.test.ts`) — known-fix replay, flaky detection, autofix job output parsing, version pinning.
+- **Hook wiring** (`hookWiring.test.ts`) — guards against the history wrappers calling themselves (a regression that froze every heal at its first step).
 
 CI (`.github/workflows/ci.yml`) runs typecheck, lint, tests, and a production build on every push and pull request.
 
@@ -503,13 +544,15 @@ CI (`.github/workflows/ci.yml`) runs typecheck, lint, tests, and a production bu
 AEGIS commits changes to *other people's repositories*, so several layers guard against destructive output:
 
 1. **Fix validation** (`fixValidator.ts`) — every fix is checked for path traversal, absolute paths, dangerous shell patterns (`rm -rf /`, curl-pipe-to-shell, fork bombs…), invalid JSON, tab-indented YAML, and **YAML that no longer parses** before commit. Blocked fixes are dropped and logged.
-1. **Composition safety** (`ruleBasedFixer.ts`) — rules are applied one at a time; a rule whose edit would make a valid YAML file unparseable is discarded on its own (the others still apply), and no rule is applied twice to the same file.
-1. **Surgical source edits** — application code is only ever changed at the exact file/line a compiler, linter, test runner or stack trace names; older rules that rewrote whole files now see CI/config files only.
-1. **Raw content for commits** — prompt-injection sanitising is applied only when text is sent to an AI model, never to the content that gets committed.
-2. **Prompt-injection filtering** (`sanitize.ts`) — repository content and CI logs are untrusted input; known injection phrasings are stripped before any text reaches an AI model.
-3. **Branch isolation** — fixes are only ever committed to a new `aegis/fix-<timestamp>` branch and opened as a PR/MR. AEGIS never pushes to the default branch.
-4. **Confidence gate** — below 65% aggregate confidence, healing pauses and asks the operator for approval instead of proceeding.
-5. **Safe mode** — analysis-only mode proposes fixes without committing anything.
+2. **Repair-only policy** (`ruleBasedFixer.ts`) — rules that need no log evidence may change a file only when its definition is invalid on its own; optional hardening never rides along in a fix PR.
+3. **Masking guard** — an edit that turns CI green by silencing the check (`continue-on-error: true`, `allow_failure: true`, `|| true`, `fail_ci_if_error: false`, `--passWithNoTests`, a lowered coverage threshold) is rejected.
+4. **Composition safety** — rules are applied one at a time; a rule whose edit would make a valid YAML file unparseable is discarded on its own (the others still apply), no rule is applied twice to the same file, and line-precise fixers keep addressing the line numbers the tools printed even after an earlier fixer removed lines.
+5. **Surgical source edits** — application code is only ever changed at the exact file/line a compiler, linter, test runner or stack trace names; older rules that rewrote whole files now see CI/config files only.
+6. **Raw content for commits** — prompt-injection sanitising is applied only when text is sent to an AI model, never to the content that gets committed.
+7. **Prompt-injection filtering** (`sanitize.ts`) — repository content and CI logs are untrusted input; known injection phrasings are stripped before any text reaches an AI model.
+8. **Branch isolation** — fixes are only ever committed to a new `aegis/fix-<timestamp>` branch and opened as a PR/MR. AEGIS never pushes to the default branch.
+9. **Confidence gate** — below 65% aggregate confidence, healing pauses and asks the operator for approval instead of proceeding.
+10. **Safe mode** — analysis-only mode proposes fixes without committing anything.
 
 Known residual risks: the AI providers can still produce semantically wrong (but structurally safe) fixes, and the injection filter is pattern-based, not exhaustive. Review AEGIS PRs like any other contributor's.
 
@@ -521,6 +564,12 @@ Known residual risks: the AI providers can still produce semantically wrong (but
 
 **How are conflicting fixes resolved?** Fixes are threaded sequentially through the orchestrator — each rule sees the previous rule's output — and finally deduplicated by file path, with static YAML fixes merged before AI fixes.
 
+**Why doesn't a fix PR include "best-practice" improvements?** A PR that fixes a failure should be easy to review and safe to merge. Caching, probes, notification tweaks and similar improvements change behaviour nobody asked to change, so they are left out of heals; they are still available with `{ hardening: true }` for an explicit audit.
+
+**Why won't AEGIS make a failing check non-blocking?** Because that hides the failure instead of healing it. When a failure can't be fixed in code — an expired token, missing cloud credentials — AEGIS reports what the owner needs to do rather than switching the check off.
+
+**Does it understand monorepos?** Yes. Tools print paths relative to the directory a job runs in; AEGIS lists the repo tree and maps those paths to real files, reads the manifests of every job directory, and edits the `package.json` / `requirements.txt` that governs the failing job.
+
 **What stops a destructive patch?** The validator layer above, plus branch isolation: worst case is a bad PR that a human closes.
 
 **When does AEGIS intentionally *not* open a PR?** When all candidate fixes are blocked by the validator, when confidence is below the gate and the operator rejects, or when no fixer or AI provider produces any change.
@@ -529,12 +578,11 @@ Known residual risks: the AI providers can still produce semantically wrong (but
 
 ## Roadmap
 
-- Webhook auto-trigger (heal on `workflow_run.completed` instead of manual start)
-- Unified diff preview before commit
+- Server-side webhook trigger (heal on `workflow_run.completed` even when the dashboard is closed — today's auto-heal runs in the open dashboard)
 - Bitbucket Pipelines / CircleCI support
-- GitHub Enterprise Server / self-hosted GitLab base URLs
+- GitHub Enterprise Server base URLs (self-hosted GitLab is supported)
 - Slack / Teams outbound notifications
-- Analytics dashboard: fixes by category, rule-vs-AI ratio, MTTR trend
+- Unified diff approval for every PR (today the approval gate triggers below 65% confidence)
 
 ---
 
