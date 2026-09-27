@@ -237,7 +237,7 @@ AI is step 5 of the healing ladder: grounded Vertex AI first, then Groq, then Ge
 | Postmortem generation | Working | Gemini writes a markdown incident report |
 | Safe mode (analysis only) | Working | Proposes fixes without committing anything |
 | Dependency Review CI check | Fixed | `.github/workflows/code-quality.yml` added with correct permissions |
-| Bitbucket Pipelines | No Not supported | No Bitbucket API integration |
+| Bitbucket Pipelines | Not supported | No Bitbucket API integration |
 | CircleCI / Jenkins | Not supported | Only GitHub Actions and GitLab CI |
 | GitHub Enterprise Server | Not supported | Hardcoded to `github.com` |
 | Self-hosted GitLab | Working | Settings → GITLAB_HOST (the instance must allow CORS from the dashboard) |
