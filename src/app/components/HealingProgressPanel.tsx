@@ -52,6 +52,8 @@ const ENGINE_LABEL: Record<NonNullable<HealingRun['engine']>, string> = {
 
 const OUTCOME: Record<NonNullable<HealingRun['outcome']>['kind'], { label: string; color: string }> = {
   healed:    { label: 'HEALED',        color: C.green },
+  partial:   { label: 'PR OPENED — CI STILL RED', color: C.amber },
+  unverified: { label: 'PR OPENED — NOT VERIFIED', color: C.amber },
   clean:     { label: 'CI_ALREADY_GREEN', color: C.green },
   flaky:     { label: 'FLAKY — NO CODE CHANGE', color: C.green },
   halted:    { label: 'HALTED',        color: C.red },

@@ -32,7 +32,9 @@ export interface TrackedFix {
   note?: string;         // block reason / commit error
 }
 
-export type OutcomeKind = 'healed' | 'clean' | 'flaky' | 'halted' | 'safe_mode' | 'cancelled' | 'error';
+// healed = PR opened and CI green on it · partial = PR opened, CI still red ·
+// unverified = PR opened, but CI could not test it (no run / base-branch-only runs / still running)
+export type OutcomeKind = 'healed' | 'partial' | 'unverified' | 'clean' | 'flaky' | 'halted' | 'safe_mode' | 'cancelled' | 'error';
 
 /** The healing ladder, most useful first — each strategy backs up the one before it. */
 export type StrategyId = 'memory' | 'rules' | 'flaky' | 'autofix' | 'ai' | 'revert';
@@ -57,7 +59,9 @@ export interface HealingRun {
   fixes: TrackedFix[];
   branch?: string;
   prUrl?: string;
-  verify?: 'running' | 'success' | 'failure' | 'timeout';
+  verify?: 'running' | 'success' | 'failure' | 'timeout' | 'inconclusive';
+  /** Why CI on the fix branch could not confirm the fix (VERIFY_INCONCLUSIVE). */
+  verifyNote?: string;
   outcome?: { kind: OutcomeKind; reason: string };
 }
 
@@ -168,7 +172,10 @@ export function applyStreamMessage(run: HealingRun, message: string, url?: strin
   if (message.startsWith('pr_creation_failed') || message.startsWith('mr_creation_failed')) return withPhase(run, 'pr', 'failed');
   if (message.startsWith('VERIFY_FIX')) return withPhase({ ...run, verify: 'running' }, 'verify', 'active');
   if (message.startsWith('FIX_VERIFIED')) return withPhase({ ...run, verify: 'success' }, 'verify', 'done');
-  if (message.startsWith('FIX_UNVERIFIED')) return { ...run, verify: 'failure' };
+  if (message.startsWith('FIX_UNVERIFIED')) return withPhase({ ...run, verify: 'failure' }, 'verify', 'failed');
+  if (message.startsWith('VERIFY_INCONCLUSIVE')) {
+    return withPhase({ ...run, verify: 'inconclusive', verifyNote: message.replace(/^VERIFY_INCONCLUSIVE :: /, '') }, 'verify', 'skipped');
+  }
   if (message.startsWith('DEEP_UNVERIFIED')) return withPhase({ ...run, verify: 'failure' }, 'verify', 'failed');
   if ((message.startsWith('VERIFY_TIMEOUT') || message.startsWith('DEEP_VERIFY_TIMEOUT')) && /monitor/i.test(message)) {
     return withPhase({ ...run, verify: 'timeout' }, 'verify', 'done');
@@ -183,7 +190,11 @@ export function inferOutcome(run: HealingRun, lastDecision: string): { kind: Out
   if (/SAFE_MODE/.test(lastDecision)) return { kind: 'safe_mode', reason: `Safe mode: ${run.fixes.length} fix(es) proposed, nothing committed` };
   if (/HEALING_CANCELLED/.test(lastDecision)) return { kind: 'cancelled', reason: 'Operator rejected the low-confidence fix' };
   if (/^ERROR ::/.test(lastDecision)) return { kind: 'error', reason };
-  if (run.prUrl) return { kind: 'healed', reason: run.verify === 'success' ? 'Fix PR opened and CI is green on the fix branch' : 'Fix PR opened' };
+  if (run.prUrl) {
+    if (run.verify === 'success') return { kind: 'healed', reason: 'Fix PR opened and CI is green on the fix branch' };
+    if (run.verify === 'failure') return { kind: 'partial', reason: `Fix PR opened with ${run.fixes.filter(f => f.status === 'committed').length} fix(es), but CI is still red on the fix branch — the remaining failures need the AI step or a human (see the PR)` };
+    return { kind: 'unverified', reason: `Fix PR opened, but CI could not verify it: ${run.verifyNote ?? 'CI did not finish in time — check the PR'}` };
+  }
   return { kind: 'halted', reason };
 }
 

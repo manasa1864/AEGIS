@@ -127,12 +127,16 @@ export async function getAllLatestFailedRuns(pat: string, owner: string, repo: s
 }
 
 /** Return failed workflow runs on a specific branch (used for deep-diagnosis after FIX_UNVERIFIED). */
+/** Failed runs of the branch's NEWEST commit that test it (earlier commits' runs are stale;
+ *  pull_request_target runs execute the base branch, not this one). */
 export async function getFailedRunsForBranch(pat: string, owner: string, repo: string, branch: string): Promise<WorkflowRun[]> {
-  const url = `${BASE}/repos/${owner}/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&status=failure&per_page=10`;
+  const url = `${BASE}/repos/${owner}/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&status=failure&per_page=30`;
   const res = await fetch(url, { headers: h(pat) });
   if (!res.ok) return [];
   const d = await res.json();
-  const runs: WorkflowRun[] = d.workflow_runs ?? [];
+  const head = await getBranchSha(pat, owner, repo, branch);
+  const runs: WorkflowRun[] = ((d.workflow_runs ?? []) as Array<WorkflowRun & { event?: string }>)
+    .filter(r => (!head || r.head_sha === head) && r.event !== 'pull_request_target');
   const seen = new Map<string, WorkflowRun>();
   for (const r of runs) {
     if (!seen.has(r.name)) seen.set(r.name, r);
@@ -346,40 +350,80 @@ export async function getComprehensiveCI(
 
 // Poll CI runs on a specific branch until all complete or timeout.
 // Used to verify that an aegis fix branch actually passes CI.
+export type BranchCIState = 'success' | 'failure' | 'timeout' | 'no_ci' | 'untested';
+export interface BranchCIResult {
+  state: BranchCIState;
+  headSha: string | null;
+  /** Runs for the branch's newest commit that actually test it. */
+  runs: WorkflowRun[];
+  /** Plain-language explanation for no_ci / untested / timeout. */
+  reason?: string;
+}
+
+const RUNNING = new Set(['in_progress', 'queued', 'pending', 'waiting', 'requested']);
+
+/** Workflow runs for exactly this commit (a branch's older commits keep their own, stale runs). */
+async function runsForCommit(pat: string, owner: string, repo: string, branch: string, sha: string): Promise<WorkflowRun[] | null> {
+  const res = await fetch(`${BASE}/repos/${owner}/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&per_page=50`, { headers: h(pat) }).catch(() => null);
+  if (!res?.ok) return null;
+  const d = await res.json().catch(() => null);
+  return ((d?.workflow_runs ?? []) as Array<WorkflowRun & { event?: string }>).filter(r => r.head_sha === sha);
+}
+
+/**
+ * Wait for CI on the NEWEST commit of `branch` and judge only runs that test it.
+ *  • runs of the branch's earlier commits are ignored — fixes are committed file by
+ *    file, and an intermediate commit's failure says nothing about the finished fix;
+ *  • `pull_request_target` runs execute the BASE branch's workflow (and usually its
+ *    code), so they cannot confirm or refute the fix — only-those ⇒ 'untested';
+ *  • no run at all for the commit ⇒ 'no_ci' (the repo's triggers skip this branch).
+ */
+export async function verifyBranchCI(
+  pat: string, owner: string, repo: string, branch: string,
+  opts: { maxWaitMs?: number; pollIntervalMs?: number; noCiAfterMs?: number; onProgress?: (msg: string) => void } = {},
+): Promise<BranchCIResult> {
+  const { maxWaitMs = 8 * 60_000, pollIntervalMs = 15_000, noCiAfterMs = 2 * 60_000, onProgress } = opts;
+  const started = Date.now();
+  const headSha = await getBranchSha(pat, owner, repo, branch);
+  if (!headSha) return { state: 'timeout', headSha, runs: [], reason: `could not read the head of ${branch}` };
+  let lastReport = '';
+
+  while (Date.now() - started < maxWaitMs) {
+    await new Promise<void>(r => setTimeout(r, pollIntervalMs));
+    const all = await runsForCommit(pat, owner, repo, branch, headSha);
+    if (!all) continue;
+    const elapsed = Math.round((Date.now() - started) / 1000);
+    if (all.length === 0) {
+      if (Date.now() - started >= noCiAfterMs) {
+        return { state: 'no_ci', headSha, runs: [], reason: `no workflow ran for ${headSha.slice(0, 7)} after ${elapsed}s — the repo's CI triggers do not cover this branch (e.g. push: branches: [main] with no pull_request trigger)` };
+      }
+      continue;
+    }
+    const running = all.filter(r => RUNNING.has(r.status));
+    if (running.length) {
+      const report = `${running.length}/${all.length} run(s) still running`;
+      if (report !== lastReport) { onProgress?.(`${report} after ${elapsed}s — ${running.map(r => r.name).join(', ')}`); lastReport = report; }
+      continue;
+    }
+    const testing = all.filter(r => (r as WorkflowRun & { event?: string }).event !== 'pull_request_target');
+    if (testing.length === 0) {
+      return { state: 'untested', headSha, runs: [], reason: `only pull_request_target runs (${all.map(r => r.name).join(', ')}) — they run the base branch's workflow, so they do not test the fix; the repo needs a push or pull_request trigger for fix branches` };
+    }
+    // A cancelled or timed-out run is not a green build — don't report the fix as verified.
+    const red = testing.some(r => FAILED_CONCLUSIONS.has(r.conclusion) || r.conclusion === 'cancelled');
+    return { state: red ? 'failure' : 'success', headSha, runs: testing };
+  }
+  return { state: 'timeout', headSha, runs: [], reason: `CI on ${headSha.slice(0, 7)} still running after ${Math.round(maxWaitMs / 60_000)} min` };
+}
+
+/** Compatibility wrapper: success / failure / timeout for the branch's newest commit. */
 export async function waitForBranchCI(
   pat: string, owner: string, repo: string, branch: string,
   maxWaitMs = 60_000,
   pollIntervalMs = 15_000,
 ): Promise<'success' | 'failure' | 'timeout'> {
-  const deadline = Date.now() + maxWaitMs;
-
-  while (Date.now() < deadline) {
-    await new Promise<void>(r => setTimeout(r, pollIntervalMs));
-    if (Date.now() >= deadline) break;
-
-    const res = await fetch(
-      `${BASE}/repos/${owner}/${repo}/actions/runs?branch=${encodeURIComponent(branch)}&per_page=10`,
-      { headers: h(pat) },
-    ).catch(() => null);
-
-    if (!res?.ok) continue;
-    const d = await res.json().catch(() => null);
-    if (!d) continue;
-
-    const runs: WorkflowRun[] = d.workflow_runs ?? [];
-    if (runs.length === 0) continue;  // CI not triggered yet — keep waiting
-
-    const anyInProgress = runs.some(r =>
-      r.status === 'in_progress' || r.status === 'queued' || r.status === 'pending' ||
-      r.status === 'waiting' || r.status === 'requested',
-    );
-    if (anyInProgress) continue;  // Still running — keep polling
-
-    // A cancelled or timed-out run is not a green build — don't report the fix as verified.
-    return runs.some(r => FAILED_CONCLUSIONS.has(r.conclusion) || r.conclusion === 'cancelled') ? 'failure' : 'success';
-  }
-
-  return 'timeout';
+  const r = await verifyBranchCI(pat, owner, repo, branch, { maxWaitMs, pollIntervalMs, noCiAfterMs: maxWaitMs });
+  return r.state === 'success' || r.state === 'failure' ? r.state : 'timeout';
 }
 
 /** Find the most recent open PR created by Aegis (branch name starts with aegis/fix-). */

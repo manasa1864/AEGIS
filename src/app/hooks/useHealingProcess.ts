@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { StreamEntry } from '../components/IntelligenceStream';
 import { SystemStatus, Project } from '../types';
-import { getAllLatestFailedRuns, getFailedRunsForBranch, getRunJobs, getWorkflowFiles, getJobLogs, createBranch, commitFile, createPR, waitForBranchCI, getOpenAegisPR } from '../lib/github';
+import { getAllLatestFailedRuns, getFailedRunsForBranch, getRunJobs, getWorkflowFiles, getJobLogs, createBranch, commitFile, createPR, waitForBranchCI, verifyBranchCI, getOpenAegisPR } from '../lib/github';
 import { getNewestPipelineOnRef, getFailedPipelineOnBranch, getPipelineJobs, getWorkflowFiles as getGitlabWorkflowFiles, getJobLogs as getGitlabJobLogs, createBranch as createGitlabBranch, commitFile as commitGitlabFile, createMR, waitForBranchPipeline } from '../lib/gitlab';
 import { analyzeAndFixWithGemini } from '../lib/gemini';
 import { analyzeAndFixWithGroq } from '../lib/groq';
@@ -1123,7 +1123,7 @@ export function useHealingProcess({
             add({ type: 'result', message: `PR_CREATED :: confidence=${aiConfidence}% recovery=${Math.round(recoveryTimeMs / 1000)}s`, status: 'success', url: prUrl, timestamp: ts() });
             if (healSignature) rememberFix(repoKey, healSignature, ghFixes.map(f => ({ path: f.path, before: ghContextFiles.find(c => c.path === f.path)?.content ?? null, after: f.content, explanation: f.explanation })), false);
             if (ghEvent) await updateEvent(ghEvent.id, {
-              status: 'healed',
+              status: 'healing', // final status once CI on the fix branch is judged (below)
               root_cause: aiAnalysis,
               fix_steps: ghFixes.map(f => f.explanation),
               confidence: aiConfidence,
@@ -1132,8 +1132,16 @@ export function useHealingProcess({
               recovery_time_ms: recoveryTimeMs,
             });
             onEventUpdated?.();
-            setSystemStatus('healthy');
-            onHealingComplete?.(project.id, confidenceToLevel(aiConfidence, true));
+            // The verdict: 'success' = CI green on the fix, 'failure' = still red,
+            // 'inconclusive' = CI could not test it (no run, base-branch-only runs, too slow).
+            let verdict: 'success' | 'failure' | 'inconclusive' = 'inconclusive';
+            const inconclusive = (reason?: string) => {
+              verdict = 'inconclusive';
+              add({ type: 'info', message: `VERIFY_INCONCLUSIVE :: ${reason ?? 'CI did not finish — check the PR'}`, timestamp: ts() });
+            };
+            const waitForFixCI = () => verifyBranchCI(effectivePat, owner, repoName, fixBranch, {
+              onProgress: m => add({ type: 'info', message: `VERIFY_WAIT :: ${m}`, timestamp: ts() }),
+            });
 
             if (geminiKey) {
               try {
@@ -1154,33 +1162,20 @@ export function useHealingProcess({
               } catch { /* memory save must not affect healing outcome */ }
             }
 
-            // Verify fix by polling CI on the fix branch (non-blocking — max 60s)
-            add({ type: 'attempt', message: `VERIFY_FIX :: polling_ci branch=${fixBranch} max_wait=60s`, timestamp: ts() });
-            const ghCiVerify = await waitForBranchCI(effectivePat, owner, repoName, fixBranch, 60_000, 15_000);
+            // Verify: CI on the fix branch's NEWEST commit only (runs of the intermediate
+            // per-file commits are stale), waiting up to 8 min with progress updates.
+            add({ type: 'attempt', message: `VERIFY_FIX :: waiting_for_ci branch=${fixBranch} newest_commit_only max_wait=8m`, timestamp: ts() });
+            const ghCiVerify = await waitForFixCI();
             if (cancelled()) return;
-            if (ghCiVerify === 'success') {
-              add({ type: 'result', message: `FIX_VERIFIED :: ci_green branch=${fixBranch} — fix_confirmed_working`, status: 'success', timestamp: ts() });
+            if (ghCiVerify.state === 'success') {
+              verdict = 'success';
+              add({ type: 'result', message: `FIX_VERIFIED :: ci_green branch=${fixBranch} commit=${ghCiVerify.headSha?.slice(0, 7)} — fix_confirmed_working`, status: 'success', timestamp: ts() });
+            } else if (ghCiVerify.state !== 'failure') {
+              // No run / base-branch-only runs / still running: nothing proves the fix wrong —
+              // no deep pass and no revert on a result CI never produced.
+              inconclusive(ghCiVerify.reason);
             } else {
-              // Timeout or red — determine final state before running deep diagnosis
-              let deepDiagResult: 'success' | 'failure' | 'timeout' = ghCiVerify;
-              if (ghCiVerify === 'timeout') {
-                add({ type: 'info', message: `VERIFY_TIMEOUT :: ci_still_running after_60s — waiting_45s_for_jobs_to_complete`, timestamp: ts() });
-                {
-                  await delay(45_000); if (cancelled()) return;
-                  deepDiagResult = await waitForBranchCI(effectivePat, owner, repoName, fixBranch, 45_000, 15_000);
-                  if (cancelled()) return;
-                  if (deepDiagResult === 'success') {
-                    add({ type: 'result', message: `FIX_VERIFIED :: ci_green after extended wait — fix_confirmed_working`, status: 'success', timestamp: ts() });
-                    deepDiagResult = 'success';
-                  } else if (deepDiagResult === 'timeout') {
-                    add({ type: 'info', message: `VERIFY_TIMEOUT :: ci_still_running after_105s — monitor_PR_directly`, timestamp: ts() });
-                    deepDiagResult = 'success'; // mark as handled so deep diagnosis is skipped
-                  }
-                  // if 'failure', fall through to deep diagnosis below
-                }
-              }
-
-              if (deepDiagResult === 'failure') {
+              verdict = 'failure';
               // CI is still red — run a deep second-pass diagnosis on the fix branch
               add({ type: 'result', message: `FIX_UNVERIFIED :: ci_red branch=${fixBranch} — starting deep_diagnosis_pass`, status: 'failure', timestamp: ts() });
               {
@@ -1251,16 +1246,17 @@ export function useHealingProcess({
                         if (sha) deepCommitted++;
                       }
                       if (deepCommitted > 0) {
-                        add({ type: 'info', message: `DEEP_FIX :: committed=${deepCommitted} to ${fixBranch} — re-checking CI max_wait=90s`, timestamp: ts() });
-                        const deepVerify = await waitForBranchCI(effectivePat, owner, repoName, fixBranch, 90_000, 15_000);
+                        add({ type: 'info', message: `DEEP_FIX :: committed=${deepCommitted} to ${fixBranch} — re-checking CI on the newest commit`, timestamp: ts() });
+                        const deepVerify = await waitForFixCI();
                         if (cancelled()) return;
-                        if (deepVerify === 'success') {
+                        if (deepVerify.state === 'success') {
+                          verdict = 'success';
                           add({ type: 'result', message: `FIX_VERIFIED :: ci_green after deep diagnosis pass`, status: 'success', timestamp: ts() });
-                        } else if (deepVerify === 'failure') {
+                        } else if (deepVerify.state === 'failure') {
                           add({ type: 'result', message: `DEEP_UNVERIFIED :: ci_red after 2 passes — see PR for manual investigation`, status: 'failure', timestamp: ts() });
                           await escalation?.();
                         } else {
-                          add({ type: 'info', message: `DEEP_VERIFY_TIMEOUT :: ci_still_running — monitor PR directly`, timestamp: ts() });
+                          inconclusive(deepVerify.reason);
                         }
                       } else {
                         add({ type: 'info', message: `DEEP_FIX :: no_new_commits — all additional fixes blocked by validator or already applied`, timestamp: ts() });
@@ -1275,8 +1271,16 @@ export function useHealingProcess({
                   }
                 } catch { /* deep pass must not affect the PR already created */ }
               }
-              } // end if (deepDiagResult === 'failure')
             }
+
+            // Finish only now: status, history and the completion callback follow the verdict.
+            const finalVerdict = verdict as 'success' | 'failure' | 'inconclusive';
+            if (ghEvent) await updateEvent(ghEvent.id, finalVerdict === 'failure'
+              ? { status: 'failed', root_cause: `Fix PR opened (${prUrl}) but CI is still red on ${fixBranch}. ${aiAnalysis}`.substring(0, 1000) }
+              : { status: 'healed', root_cause: `${finalVerdict === 'inconclusive' ? '[UNVERIFIED — CI could not test the fix branch] ' : ''}${aiAnalysis}`.substring(0, 1000) });
+            onEventUpdated?.();
+            setSystemStatus(finalVerdict === 'failure' ? 'stopped' : 'healthy');
+            onHealingComplete?.(project.id, finalVerdict === 'failure' ? 'HIGH' : confidenceToLevel(aiConfidence, true));
           } else {
             add({ type: 'result', message: `pr_creation_failed :: branch=${fixBranch} exists with commits`, status: 'failure', timestamp: ts() });
             if (ghEvent) await updateEvent(ghEvent.id, { status: 'failed', root_cause: 'pr_creation_failed' });
