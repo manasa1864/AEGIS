@@ -74,139 +74,139 @@ AI is step 5 of the healing ladder: grounded Vertex AI first, then Groq, then Ge
 
 ## Error Categories — What AEGIS Can Detect and Fix
 
-**Fix column:** ✅ rule-based fix · 🔁 re-run first (transient — no code change) · ↩️ revert to the last green build · 🤖 AI step (needs judgement; rules still fix the specific errors they recognise) · 👤 needs the repo owner (credentials or tokens only they can create)
+**Fix column:** *Rule-based* — a deterministic rule fixes it · *Re-run* — transient, re-running the failed jobs heals it with no code change · *Revert* — revert to the last green build · *AI* — needs judgement (rules still fix the specific errors they recognise) · *Owner* — needs credentials or tokens only the repo owner can create
 
 ### Simple
 
 | Category | Description | Auto-Fix |
 |---|---|---|
-| `yaml_syntax` | YAML parse error, tab indentation, missing colon | ✅ Rule-based |
-| `invalid_workflow_syntax` | GitHub Actions structural / semantic bugs | ✅ Rule-based |
-| `invalid_gitlab_ci` | `.gitlab-ci.yml` structure / syntax error | ✅ Rule-based |
-| `actions_deprecation` | Node.js 20 runtime deprecated, stale action versions | ✅ Rule-based |
-| `env_missing` | Secret or env var not set | ✅ Rule-based |
-| `secret_missing` | Required Actions secret not configured | ✅ Rule-based |
-| `missing_file` | Referenced file does not exist | ✅ Rule-based |
-| `missing_dependency` | npm/yarn ENOENT, cannot find module | ✅ Rule-based |
-| `node_version` | Node.js version mismatch / unsupported | ✅ Rule-based |
-| `python_deps` | pip / requirements.txt failure | ✅ Rule-based |
-| `venv_missing` | Python virtualenv not activated | ✅ Rule-based |
-| `lockfile_corrupt` | npm/yarn lockfile integrity failure | ✅ Rule-based |
-| `dependency_vulnerability` | npm audit / pip-audit gate fails on known advisories | ✅ Rule-based |
-| `build_failure` | Build command exited non-zero | ✅ Rule-based |
-| `compilation_failure` | TypeScript / Python / Java compilation error | ✅ Rule-based |
-| `lint_failure` | ESLint / TypeScript / Prettier errors | ✅ Rule-based |
-| `lint_format_failure` | Prettier / ESLint format check failure | ✅ Rule-based |
-| `test_failure` | Jest / vitest / mocha / pytest failures | ✅ Rule-based |
-| `memory_error` | OOM, heap overflow, segfault | ✅ Rule-based |
-| `permission_denied` | Script not executable, EACCES | ✅ Rule-based |
-| `permissions_error` | GitHub token missing required scope (403) | ✅ Rule-based |
-| `concurrency_issue` | Run cancelled by concurrency group | 🔁 Re-run — a newer run superseded it; nothing is broken |
-| `job_timeout` | Job exceeded runner time limit | ✅ Rule-based |
-| `husky_hook_failure` | Husky pre-commit hooks failing in CI | ✅ Rule-based |
-| `vite_build_failure` | Vite chunk size / env mode / config error | ✅ Rule-based |
-| `webpack_build_failure` | Webpack OOM / bundle / config failure | ✅ Rule-based |
+| `yaml_syntax` | YAML parse error, tab indentation, missing colon | Rule-based |
+| `invalid_workflow_syntax` | GitHub Actions structural / semantic bugs | Rule-based |
+| `invalid_gitlab_ci` | `.gitlab-ci.yml` structure / syntax error | Rule-based |
+| `actions_deprecation` | Node.js 20 runtime deprecated, stale action versions | Rule-based |
+| `env_missing` | Secret or env var not set | Rule-based |
+| `secret_missing` | Required Actions secret not configured | Rule-based |
+| `missing_file` | Referenced file does not exist | Rule-based |
+| `missing_dependency` | npm/yarn ENOENT, cannot find module | Rule-based |
+| `node_version` | Node.js version mismatch / unsupported | Rule-based |
+| `python_deps` | pip / requirements.txt failure | Rule-based |
+| `venv_missing` | Python virtualenv not activated | Rule-based |
+| `lockfile_corrupt` | npm/yarn lockfile integrity failure | Rule-based |
+| `dependency_vulnerability` | npm audit / pip-audit gate fails on known advisories | Rule-based |
+| `build_failure` | Build command exited non-zero | Rule-based |
+| `compilation_failure` | TypeScript / Python / Java compilation error | Rule-based |
+| `lint_failure` | ESLint / TypeScript / Prettier errors | Rule-based |
+| `lint_format_failure` | Prettier / ESLint format check failure | Rule-based |
+| `test_failure` | Jest / vitest / mocha / pytest failures | Rule-based |
+| `memory_error` | OOM, heap overflow, segfault | Rule-based |
+| `permission_denied` | Script not executable, EACCES | Rule-based |
+| `permissions_error` | GitHub token missing required scope (403) | Rule-based |
+| `concurrency_issue` | Run cancelled by concurrency group | Re-run — a newer run superseded it; nothing is broken |
+| `job_timeout` | Job exceeded runner time limit | Rule-based |
+| `husky_hook_failure` | Husky pre-commit hooks failing in CI | Rule-based |
+| `vite_build_failure` | Vite chunk size / env mode / config error | Rule-based |
+| `webpack_build_failure` | Webpack OOM / bundle / config failure | Rule-based |
 
 ### Intermediate (Git, Pipeline, Config, Runtime, Testing)
 
 | Category | Description | Auto-Fix |
 |---|---|---|
-| `git_merge_conflict` | Merge conflict markers in committed files | ✅ Rule-based |
-| `git_push_rejected` | Push rejected — protected branch or identity | ✅ Rule-based |
-| `git_submodule_error` | Submodule init / update failure | ✅ Rule-based |
-| `git_lfs_error` | Git LFS smudge filter failure | ✅ Rule-based |
-| `git_tag_failure` | git tag / semantic-release failure | ✅ Rule-based |
-| `git_credential_failure` | git clone / fetch / push auth failure | ✅ Rule-based |
-| `git_detached_head` | Git detached HEAD state during CI | ✅ Rule-based |
-| `git_commit_rejected` | Commit rejected by hook or branch policy | ✅ Rule-based |
-| `git_access_denied` | Repository read/write access denied | ✅ Rule-based |
-| `git_invalid_branch` | Invalid or protected branch reference | ✅ Rule-based |
-| `invalid_branch` | Branch reference not found | ✅ Rule-based |
-| `circular_dependency` | Circular job dependency in pipeline | ✅ Rule-based |
-| `artifact_failure` | Artifact upload / download failure | ✅ Rule-based |
-| `artifact_missing` | Required artifact not found for download | ✅ Rule-based |
-| `artifact_upload_failure` | Artifact / report upload step failed | ✅ Rule-based |
-| `artifact_retention` | Artifact storage / retention issue | ✅ Rule-based |
-| `cache_failure` | Cache restore / save failure | ✅ Rule-based |
-| `cache_restore_failure` | Cache restore step failed | ✅ Rule-based |
-| `coverage_failure` | Coverage threshold not met | 🤖 AI — writes tests; thresholds are never lowered |
-| `snapshot_mismatch` | Jest / Vitest snapshot mismatch | ✅ Rule-based |
-| `runner_unavailable` | Runner offline or label typo | ✅ Rule-based |
-| `e2e_failure` | Playwright / Cypress browser setup failure | ✅ Rule-based |
-| `mock_failure` | Test mock / stub setup failure | ✅ Rule-based |
-| `pipeline_stage_failure` | Pipeline stage orchestration failure | ✅ Rule-based |
-| `stage_order_error` | Job stage dependency ordering error | ✅ Rule-based |
-| `invalid_trigger` | Invalid pipeline trigger or event filter | ✅ Rule-based |
-| `parallel_sync_issue` | Parallel job synchronization failure | 🤖 AI |
-| `null_reference` | Null pointer / undefined reference | ✅ Rule-based |
-| `type_mismatch` | Type cast or type assertion error | ✅ Rule-based |
-| `infinite_loop` | Process hung / infinite loop | ✅ Rule-based |
-| `stack_overflow` | Stack overflow / recursion limit | ✅ Rule-based |
-| `segfault` | Segmentation fault / SIGSEGV | ✅ Rule-based |
-| `unhandled_exception` | Unhandled exception / panic | ✅ Rule-based |
-| `missing_config_file` | Required config file not found | ✅ Rule-based |
-| `config_hierarchy_error` | Config inheritance / hierarchy error | ✅ Rule-based |
-| `unsupported_config_param` | Unknown config parameter | ✅ Rule-based |
-| `duplicate_config_key` | Duplicate key in config file | ✅ Rule-based |
-| `env_mapping_error` | Env var mapping / injection error | ✅ Rule-based |
+| `git_merge_conflict` | Merge conflict markers in committed files | Rule-based |
+| `git_push_rejected` | Push rejected — protected branch or identity | Rule-based |
+| `git_submodule_error` | Submodule init / update failure | Rule-based |
+| `git_lfs_error` | Git LFS smudge filter failure | Rule-based |
+| `git_tag_failure` | git tag / semantic-release failure | Rule-based |
+| `git_credential_failure` | git clone / fetch / push auth failure | Rule-based |
+| `git_detached_head` | Git detached HEAD state during CI | Rule-based |
+| `git_commit_rejected` | Commit rejected by hook or branch policy | Rule-based |
+| `git_access_denied` | Repository read/write access denied | Rule-based |
+| `git_invalid_branch` | Invalid or protected branch reference | Rule-based |
+| `invalid_branch` | Branch reference not found | Rule-based |
+| `circular_dependency` | Circular job dependency in pipeline | Rule-based |
+| `artifact_failure` | Artifact upload / download failure | Rule-based |
+| `artifact_missing` | Required artifact not found for download | Rule-based |
+| `artifact_upload_failure` | Artifact / report upload step failed | Rule-based |
+| `artifact_retention` | Artifact storage / retention issue | Rule-based |
+| `cache_failure` | Cache restore / save failure | Rule-based |
+| `cache_restore_failure` | Cache restore step failed | Rule-based |
+| `coverage_failure` | Coverage threshold not met | AI — writes tests; thresholds are never lowered |
+| `snapshot_mismatch` | Jest / Vitest snapshot mismatch | Rule-based |
+| `runner_unavailable` | Runner offline or label typo | Rule-based |
+| `e2e_failure` | Playwright / Cypress browser setup failure | Rule-based |
+| `mock_failure` | Test mock / stub setup failure | Rule-based |
+| `pipeline_stage_failure` | Pipeline stage orchestration failure | Rule-based |
+| `stage_order_error` | Job stage dependency ordering error | Rule-based |
+| `invalid_trigger` | Invalid pipeline trigger or event filter | Rule-based |
+| `parallel_sync_issue` | Parallel job synchronization failure | AI |
+| `null_reference` | Null pointer / undefined reference | Rule-based |
+| `type_mismatch` | Type cast or type assertion error | Rule-based |
+| `infinite_loop` | Process hung / infinite loop | Rule-based |
+| `stack_overflow` | Stack overflow / recursion limit | Rule-based |
+| `segfault` | Segmentation fault / SIGSEGV | Rule-based |
+| `unhandled_exception` | Unhandled exception / panic | Rule-based |
+| `missing_config_file` | Required config file not found | Rule-based |
+| `config_hierarchy_error` | Config inheritance / hierarchy error | Rule-based |
+| `unsupported_config_param` | Unknown config parameter | Rule-based |
+| `duplicate_config_key` | Duplicate key in config file | Rule-based |
+| `env_mapping_error` | Env var mapping / injection error | Rule-based |
 
 ### Advanced (Auth, Docker, Deployment, API, Database)
 
 | Category | Description | Auto-Fix |
 |---|---|---|
-| `docker_auth` | Docker Hub login / credentials not configured | ✅ Rule-based |
-| `docker_build` | Dockerfile / image build failure | ✅ Rule-based for specific errors (Dockerfile path, unknown / misspelled instructions) · 🤖 AI otherwise |
-| `docker_rate_limit` | Docker Hub pull rate limit (429) | 🔁 Re-run · authenticate pulls if it persists |
-| `dockerfile_syntax` | Dockerfile instruction / syntax error | ✅ Rule-based |
-| `missing_docker_layer` | Docker build layer missing from cache | ✅ Rule-based |
-| `container_startup` | Container failed to start | ✅ Rule-based |
-| `container_health_failure` | Container health check fails | ✅ Rule-based |
-| `registry_auth_failure` | Registry push/pull auth failure (GHCR, ECR, GCR, ACR) | ✅ Rule-based |
-| `volume_mount_failure` | Docker volume mount failure | ✅ Rule-based |
-| `image_pull_failure` | Docker image pull denied / not found | 🔁 Re-run · then 🤖 AI / 👤 owner (image name or credentials) |
-| `oidc_failure` | OIDC/Federated auth for AWS, GCP, Azure | ✅ Rule-based |
-| `invalid_token` | Expired / invalid API token (401) | 👤 Owner — re-issue the token secret |
-| `ssh_key_error` | SSH key authentication failure | ✅ Rule-based |
-| `oauth_failure` | OAuth token invalid / expired | ✅ Rule-based |
-| `secret_access_denied` | Vault / secret manager access denied | ✅ Rule-based |
-| `insufficient_role` | IAM / RBAC role lacks required permissions | ✅ Rule-based |
-| `cross_project_access` | Cross-project / cross-org resource access denied | ✅ Rule-based |
-| `aws_auth_failure` | AWS credential / IAM role assumption failure | 👤 Owner — OIDC role or access-key secrets |
-| `gcp_auth_failure` | GCP service account / workload identity failure | 👤 Owner — Workload Identity or service-account key |
-| `deploy_failure` | Production deployment failure | ✅ Rule-based for manifest errors (selector/labels, revision history) · 🤖 AI otherwise |
-| `rollback_failure` | Deployment rollback failed | ✅ Rule-based |
-| `failed_production_deploy` | Production deployment permanently failed | ↩️ Revert to last green |
-| `blue_green_conflict` | Blue-green traffic switch conflict | ✅ Rule-based |
-| `canary_mismatch` | Canary deployment version mismatch | ↩️ Revert to last green |
-| `service_unavailable` | Upstream service 503 / 502 | ✅ Rule-based |
-| `load_balancer_issue` | ALB/ELB/nginx health check failing | 🤖 AI |
-| `health_check_failure` | Service or container health check failure | ✅ Rule-based |
-| `port_conflict` | Port already bound / EADDRINUSE | ✅ Rule-based |
-| `api_rate_limit` | API rate limiting (429) | ✅ Rule-based |
-| `api_timeout` | API / network timeout (ETIMEDOUT) | ✅ Rule-based |
-| `webhook_failure` | Webhook delivery / signature failure | ✅ Rule-based |
-| `invalid_api_response` | API returns unexpected HTTP status | ✅ Rule-based |
-| `rest_endpoint_mismatch` | REST endpoint URL / method mismatch | ✅ Rule-based |
-| `third_party_failure` | External integration outage (Snyk, Datadog…) | ✅ Rule-based |
-| `schema_validation` | JSON/OpenAPI schema validation error | 🤖 AI — the spec itself is fixed; the gate is never switched off |
-| `graphql_failure` | GraphQL query / introspection error | ✅ Rule-based |
-| `terraform_failure` | Terraform init / plan / apply failure | ✅ Rule-based |
-| `matrix_failure` | Matrix strategy job failure | ✅ Rule-based |
-| `go_build_failure` | Go module download / build failure | ✅ Rule-based |
-| `rust_build_failure` | Rust/Cargo compilation or dependency failure | ✅ Rule-based |
-| `dotnet_build_failure` | .NET restore / build / publish failure | ✅ Rule-based |
-| `gradle_build_failure` | Gradle build or dependency resolution failure | ✅ Rule-based |
-| `maven_build_failure` | Maven build or dependency resolution failure | 🤖 AI (dependency coordinates / repository auth) |
-| `runtime_version_error` | Node/Python/Java runtime version mismatch | ✅ Rule-based |
-| `db_connection_error` | Database connection refused (ECONNREFUSED) | ✅ Rule-based |
-| `db_migration_error` | Database migration failure | ✅ Rule-based |
-| `db_deadlock` | Database deadlock detected | ✅ Rule-based |
-| `db_query_failure` | Query execution failure / timeout | ✅ Rule-based |
-| `db_replication_lag` | Read replica replication lag | ✅ Rule-based |
-| `db_schema_mismatch` | Database schema out of sync with models | ✅ Rule-based |
-| `missing_db_index` | Missing database index causing slow queries | ✅ Rule-based |
-| `transaction_rollback` | Database transaction rolled back | ✅ Rule-based |
-| `unknown` | Unclassified failure — no log signal | ⚠️ AI only |
+| `docker_auth` | Docker Hub login / credentials not configured | Rule-based |
+| `docker_build` | Dockerfile / image build failure | Rule-based for specific errors (Dockerfile path, unknown / misspelled instructions) · AI otherwise |
+| `docker_rate_limit` | Docker Hub pull rate limit (429) | Re-run · authenticate pulls if it persists |
+| `dockerfile_syntax` | Dockerfile instruction / syntax error | Rule-based |
+| `missing_docker_layer` | Docker build layer missing from cache | Rule-based |
+| `container_startup` | Container failed to start | Rule-based |
+| `container_health_failure` | Container health check fails | Rule-based |
+| `registry_auth_failure` | Registry push/pull auth failure (GHCR, ECR, GCR, ACR) | Rule-based |
+| `volume_mount_failure` | Docker volume mount failure | Rule-based |
+| `image_pull_failure` | Docker image pull denied / not found | Re-run · then AI / owner (image name or credentials) |
+| `oidc_failure` | OIDC/Federated auth for AWS, GCP, Azure | Rule-based |
+| `invalid_token` | Expired / invalid API token (401) | Owner — re-issue the token secret |
+| `ssh_key_error` | SSH key authentication failure | Rule-based |
+| `oauth_failure` | OAuth token invalid / expired | Rule-based |
+| `secret_access_denied` | Vault / secret manager access denied | Rule-based |
+| `insufficient_role` | IAM / RBAC role lacks required permissions | Rule-based |
+| `cross_project_access` | Cross-project / cross-org resource access denied | Rule-based |
+| `aws_auth_failure` | AWS credential / IAM role assumption failure | Owner — OIDC role or access-key secrets |
+| `gcp_auth_failure` | GCP service account / workload identity failure | Owner — Workload Identity or service-account key |
+| `deploy_failure` | Production deployment failure | Rule-based for manifest errors (selector/labels, revision history) · AI otherwise |
+| `rollback_failure` | Deployment rollback failed | Rule-based |
+| `failed_production_deploy` | Production deployment permanently failed | Revert to last green |
+| `blue_green_conflict` | Blue-green traffic switch conflict | Rule-based |
+| `canary_mismatch` | Canary deployment version mismatch | Revert to last green |
+| `service_unavailable` | Upstream service 503 / 502 | Rule-based |
+| `load_balancer_issue` | ALB/ELB/nginx health check failing | AI |
+| `health_check_failure` | Service or container health check failure | Rule-based |
+| `port_conflict` | Port already bound / EADDRINUSE | Rule-based |
+| `api_rate_limit` | API rate limiting (429) | Rule-based |
+| `api_timeout` | API / network timeout (ETIMEDOUT) | Rule-based |
+| `webhook_failure` | Webhook delivery / signature failure | Rule-based |
+| `invalid_api_response` | API returns unexpected HTTP status | Rule-based |
+| `rest_endpoint_mismatch` | REST endpoint URL / method mismatch | Rule-based |
+| `third_party_failure` | External integration outage (Snyk, Datadog…) | Rule-based |
+| `schema_validation` | JSON/OpenAPI schema validation error | AI — the spec itself is fixed; the gate is never switched off |
+| `graphql_failure` | GraphQL query / introspection error | Rule-based |
+| `terraform_failure` | Terraform init / plan / apply failure | Rule-based |
+| `matrix_failure` | Matrix strategy job failure | Rule-based |
+| `go_build_failure` | Go module download / build failure | Rule-based |
+| `rust_build_failure` | Rust/Cargo compilation or dependency failure | Rule-based |
+| `dotnet_build_failure` | .NET restore / build / publish failure | Rule-based |
+| `gradle_build_failure` | Gradle build or dependency resolution failure | Rule-based |
+| `maven_build_failure` | Maven build or dependency resolution failure | AI (dependency coordinates / repository auth) |
+| `runtime_version_error` | Node/Python/Java runtime version mismatch | Rule-based |
+| `db_connection_error` | Database connection refused (ECONNREFUSED) | Rule-based |
+| `db_migration_error` | Database migration failure | Rule-based |
+| `db_deadlock` | Database deadlock detected | Rule-based |
+| `db_query_failure` | Query execution failure / timeout | Rule-based |
+| `db_replication_lag` | Read replica replication lag | Rule-based |
+| `db_schema_mismatch` | Database schema out of sync with models | Rule-based |
+| `missing_db_index` | Missing database index causing slow queries | Rule-based |
+| `transaction_rollback` | Database transaction rolled back | Rule-based |
+| `unknown` | Unclassified failure — no log signal | AI only |
 
 ---
 
@@ -214,41 +214,41 @@ AI is step 5 of the healing ladder: grounded Vertex AI first, then Groq, then Ge
 
 | Feature | Status | Notes |
 |---|---|---|
-| GitHub Actions integration | ✅ Working | Detects all failing workflows per push |
-| GitLab CI integration | ✅ Working | Full pipeline + job log support |
-| Static YAML analysis | ✅ Working | Runs before log-based diagnosis; catches bugs with no log output |
-| Rule-based auto-fix (~1,000 fixer functions) | ✅ Working | Deterministic; no AI key required |
-| Repair-only fix PRs | ✅ Working | Optional hardening (caching, probes, env niceties) is never mixed into a heal; edits that silence a check (`continue-on-error`, `\|\| true`, lowered coverage…) are rejected |
-| Monorepo / subdirectory projects | ✅ Working | Repo tree resolves paths relative to each job's `working-directory`; manifest fixes edit the manifest of the failing job |
-| Every failed job diagnosed | ✅ Working | Up to 10 failed jobs per heal (was 5); runs rejected before any job started are recognised as invalid workflow files |
-| Dependency security gates | ✅ Working | `npm audit` / `pip-audit` failures → vulnerable direct dependencies upgraded to their first patched release |
-| Groq AI analysis | ✅ Working | JSON parser fixed (balanced-bracket extraction) |
-| Gemini AI analysis | ✅ Working | Used as fallback + postmortem generation |
-| Vertex AI grounded analysis | ✅ Working | Uses Google Search grounding |
-| Static fixes merged into commit | ✅ Fixed | Were previously computed but orphaned; now correctly merged after AI path |
-| Multi-workflow failure detection | ✅ Working | Fixes all failing workflows in one PR |
-| Automatic branch + PR creation | ✅ Working | Branch named `aegis/fix-<timestamp>` |
-| CI verification polling | ✅ Working | Polls the fix branch; triggers the deep second pass if still red, then escalates to revert |
-| Deep second-pass diagnosis | ✅ Working | Re-fetches logs from fix branch; runs full fixer pipeline again |
-| Iterative healing | ✅ Working | Resumes from existing open aegis PRs instead of re-branching |
-| Confidence threshold + approval | ✅ Working | Pauses at < 65% confidence and shows operator modal |
-| Failure memory (embeddings) | ✅ Working | Gemini embeddings; surfaces similar past failures |
-| MTTR tracking | ✅ Working | Recorded per healing event in the backend |
-| Postmortem generation | ✅ Working | Gemini writes a markdown incident report |
-| Safe mode (analysis only) | ✅ Working | Proposes fixes without committing anything |
-| Dependency Review CI check | ✅ Fixed | `.github/workflows/code-quality.yml` added with correct permissions |
-| Bitbucket Pipelines | ❌ Not supported | No Bitbucket API integration |
-| CircleCI / Jenkins | ❌ Not supported | Only GitHub Actions and GitLab CI |
-| GitHub Enterprise Server | ❌ Not supported | Hardcoded to `github.com` |
-| Self-hosted GitLab | ✅ Working | Settings → GITLAB_HOST (the instance must allow CORS from the dashboard) |
-| Auto-heal | ✅ Working | Settings → AUTO_HEAL: while the dashboard is open, a repo whose CI turns red starts healing (30s polling; not a server-side webhook) |
-| Non-AI healing strategies | ✅ Working | Known-fix replay, compiler suggestions, exact versions, flaky rerun, the repo's own auto-fixers in CI, revert-to-last-green |
-| Slack / Teams notifications | ❌ Not implemented | No outbound notification channel |
-| Live healing view + per-file diffs | ✅ Working | Phase stepper, diagnosed causes, each fix's diff and commit status, PR + CI verdict update live |
-| Code-level fixes | ✅ Working | Surgical edits at the logged file:line — unused imports, prefer-const, ESLint `eqeqeq`/`use-isnan`/`no-var`/`no-console`/unused locals, ruff `E711`/`E722`/`F541`/`B006`, missing TS exports, moved Python modules, `yaml.load`, off-by-one loops, compiler "did you mean", debugger, `.only`, TS2578, null deref, missing packages |
-| Fix catalog | ✅ Working | `fix-catalog/` — 146 scenarios across 116 categories, simple → complex; every diff is real engine output |
-| GitLab MCP tool calls | ⚠️ Partial | MCP bridge server (`server.js`) exists but tool coverage is limited |
-| `unknown` category auto-fix | ⚠️ AI only | No rule-based fixer; depends entirely on Groq / Gemini output |
+| GitHub Actions integration | Working | Detects all failing workflows per push |
+| GitLab CI integration | Working | Full pipeline + job log support |
+| Static YAML analysis | Working | Runs before log-based diagnosis; catches bugs with no log output |
+| Rule-based auto-fix (~1,000 fixer functions) | Working | Deterministic; no AI key required |
+| Repair-only fix PRs | Working | Optional hardening (caching, probes, env niceties) is never mixed into a heal; edits that silence a check (`continue-on-error`, `\|\| true`, lowered coverage…) are rejected |
+| Monorepo / subdirectory projects | Working | Repo tree resolves paths relative to each job's `working-directory`; manifest fixes edit the manifest of the failing job |
+| Every failed job diagnosed | Working | Up to 10 failed jobs per heal (was 5); runs rejected before any job started are recognised as invalid workflow files |
+| Dependency security gates | Working | `npm audit` / `pip-audit` failures → vulnerable direct dependencies upgraded to their first patched release |
+| Groq AI analysis | Working | JSON parser fixed (balanced-bracket extraction) |
+| Gemini AI analysis | Working | Used as fallback + postmortem generation |
+| Vertex AI grounded analysis | Working | Uses Google Search grounding |
+| Static fixes merged into commit | Fixed | Were previously computed but orphaned; now correctly merged after AI path |
+| Multi-workflow failure detection | Working | Fixes all failing workflows in one PR |
+| Automatic branch + PR creation | Working | Branch named `aegis/fix-<timestamp>` |
+| CI verification polling | Working | Polls the fix branch; triggers the deep second pass if still red, then escalates to revert |
+| Deep second-pass diagnosis | Working | Re-fetches logs from fix branch; runs full fixer pipeline again |
+| Iterative healing | Working | Resumes from existing open aegis PRs instead of re-branching |
+| Confidence threshold + approval | Working | Pauses at < 65% confidence and shows operator modal |
+| Failure memory (embeddings) | Working | Gemini embeddings; surfaces similar past failures |
+| MTTR tracking | Working | Recorded per healing event in the backend |
+| Postmortem generation | Working | Gemini writes a markdown incident report |
+| Safe mode (analysis only) | Working | Proposes fixes without committing anything |
+| Dependency Review CI check | Fixed | `.github/workflows/code-quality.yml` added with correct permissions |
+| Bitbucket Pipelines | No Not supported | No Bitbucket API integration |
+| CircleCI / Jenkins | Not supported | Only GitHub Actions and GitLab CI |
+| GitHub Enterprise Server | Not supported | Hardcoded to `github.com` |
+| Self-hosted GitLab | Working | Settings → GITLAB_HOST (the instance must allow CORS from the dashboard) |
+| Auto-heal | Working | Settings → AUTO_HEAL: while the dashboard is open, a repo whose CI turns red starts healing (30s polling; not a server-side webhook) |
+| Non-AI healing strategies | Working | Known-fix replay, compiler suggestions, exact versions, flaky rerun, the repo's own auto-fixers in CI, revert-to-last-green |
+| Slack / Teams notifications | Not implemented | No outbound notification channel |
+| Live healing view + per-file diffs | Working | Phase stepper, diagnosed causes, each fix's diff and commit status, PR + CI verdict update live |
+| Code-level fixes | Working | Surgical edits at the logged file:line — unused imports, prefer-const, ESLint `eqeqeq`/`use-isnan`/`no-var`/`no-console`/unused locals, ruff `E711`/`E722`/`F541`/`B006`, missing TS exports, moved Python modules, `yaml.load`, off-by-one loops, compiler "did you mean", debugger, `.only`, TS2578, null deref, missing packages |
+| Fix catalog | Working | `fix-catalog/` — 146 scenarios across 116 categories, simple → complex; every diff is real engine output |
+| GitLab MCP tool calls | Partial | MCP bridge server (`server.js`) exists but tool coverage is limited |
+| `unknown` category auto-fix | AI only | No rule-based fixer; depends entirely on Groq / Gemini output |
 
 ---
 
@@ -487,17 +487,17 @@ Each diff begins with a `#` header (error, CI log excerpt, explanation of every 
 
 | Platform | Detect failures | Fetch logs | Auto-fix + PR |
 |---|---|---|---|
-| GitHub Actions | ✅ | ✅ | ✅ |
-| GitLab CI | ✅ | ✅ | ✅ (MR) |
-| Bitbucket Pipelines | ❌ | ❌ | ❌ |
-| CircleCI | ❌ | ❌ | ❌ |
-| Jenkins | ❌ | ❌ | ❌ |
+| GitHub Actions | Yes | Yes | Yes |
+| GitLab CI | Yes | Yes | Yes (MR) |
+| Bitbucket Pipelines | No | No | No |
+| CircleCI | No | No | No |
+| Jenkins | No | No | No |
 
 ---
 
 ## Screenshots & Demo
 
-> 📸 *Add screenshots here before publishing — visuals are the first thing reviewers look at.*
+> *Add screenshots here before publishing — visuals are the first thing reviewers look at.*
 >
 > Suggested captures (place them in `docs/screenshots/` and embed below):
 > 1. Dashboard with a repo in `HEALING` state
